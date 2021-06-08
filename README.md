@@ -1,7 +1,6 @@
-Layerwise Learned CNN
+Layerwise Learned Convex CNN
 
-This is code associated with the paper https://arxiv.org/abs/1812.11446
-This is a peliminary research code and some more refinements are needed.
+This is code built originally the paper https://arxiv.org/abs/1812.11446. It builds upon this paper by using equivalent convex formulations of neural networks as proposed originally in Pilanci and Ergen, ICML 2020. This repo is currently a work in progress. 
 
 ## Imagenet
 Imagenet experiments for 1-hidden layer use the standalone imagenet_single_layer.py
