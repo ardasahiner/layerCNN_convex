@@ -26,10 +26,10 @@ import json
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
+parser.add_argument('--lr', default=1e-2, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
-parser.add_argument('--nepochs',  default=1,type=int, help='number of epochs')
+parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
 parser.add_argument('--epochdecay',  default=20,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=64,type=int, help='feature size')
@@ -134,6 +134,19 @@ def train_classifier(epoch,n):
     net.train()
     for k in range(n):
         net.blocks[k].eval()
+
+
+    if args.debug_parameters:
+    #This is used to verify that early layers arent updated
+        import copy
+        #store all parameters on cpu as numpy array
+        net_cpu = copy.deepcopy(net).cpu()
+        net_cpu_dict = net_cpu.state_dict()
+        with open(debug_log_txt, "a") as text_file:
+            print('n: %d'%n)
+            for param in net_cpu_dict.keys():
+                net_cpu_dict[param]=net_cpu_dict[param].numpy()
+                print("parameter stored on cpu as numpy: %s  "%(param),file=text_file)
 
     train_loss = 0
     correct = 0

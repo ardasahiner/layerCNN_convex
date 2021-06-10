@@ -228,6 +228,7 @@ class convexGreedyNet(nn.Module):
                 p.grad = None
 
         for p in self.blocks[n].parameters():
+            print(p.shape)
             p.requires_grad = True
 
     def unfreezeAll(self):
