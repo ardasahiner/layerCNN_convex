@@ -4,92 +4,143 @@ import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
 from scipy.fftpack import dct, idct
+import numpy as np
 
-
-def generate_sign_patterns(A, P, bias=True, n_channels=3, sparsity=None): 
+def generate_sign_patterns(P, kernel, h, k, bias=True, n_channels=3, sparsity=None): 
     # generate sign patterns
-    n, k, h = A.shape
-    
-    umat = np.random.normal(0, 1, (h,P))
-    kernel = int(np.sqrt(h/n_channels))
+    umat = np.random.normal(0, 1, (P, n_channels, kernel, kernel))
     
     if sparsity is not None:
-        umat = umat.reshape((n_channels, kernel, kernel, P)).transpose(3, 0, 1,2)
         umat_fft = dct(dct(umat, axis=0), axis=1)
         mask = np.random.choice([1, 0], size=(P, n_channels, kernel, kernel), p=[sparsity, 1-sparsity])
         umat = idct(idct(umat * mask, axis=0), axis=1)
-        umat = umat.transpose(1, 2, 3, 0).reshape((h, P))
-        
-    umat = torch.from_numpy(umat).float()
-    biasmat = np.random.normal(0, torch.std(umat), (1,k, P))
     
-    return umat, torch.fromm_numpy(biasmat).float()
+    umat = umat.transpose(1, 2, 3, 0).reshape((h, P))
+    umat = torch.from_numpy(umat).float()
+    biasmat = np.random.normal(0, torch.std(umat), (1, 1, P))
+    
+    return umat, torch.from_numpy(biasmat).float()
 
 class custom_cvx_layer(torch.nn.Module):
-    def __init__(self, h, k, num_neurons, avg_size=16, num_classes=10, bias=False, downsample=False):
+    def __init__(self, in_planes, planes, in_size=32,
+                 kernel_size=3, padding=1, avg_size=16, num_classes=10,
+                 bias=False, downsample=False, sparsity=None, feat_aggregate='random'):
         """
         In the constructor we instantiate two nn.Linear modules and assign them as
         member variables.
         """
         super(custom_cvx_layer, self).__init__()
-        
+
+        self.feat_aggregate = feat_aggregate
+        h = int(kernel_size**2) * in_planes
         self.avg_size = avg_size
+        self.P = planes
+        self.h = h
+        self.num_classes = num_classes
+        self.downsample = downsample
+        if downsample:
+            self.down = psi(2)
+            in_size = in_size // 2
+
+        self.out_size = (in_size+ 2*padding - kernel_size + 1) # assumes a stride and dilation of 1
+        k = int(self.out_size**2)
         if downsample:
             self.down = psi(2)
         self.k_eff= int(k/int(avg_size**2))
         
         # P x k x h x C
-        self.v = torch.nn.Parameter(data=torch.zeros(num_neurons, self.k_eff, h, num_classes), requires_grad=True)
-        
-        self.v_bias = torch.nn.Parameter(data=torch.zeros(num_neurons, self.k_eff, 1, num_classes), requires_grad=bias)
+        self.v = torch.nn.Parameter(data=torch.zeros(planes, self.k_eff, h, num_classes), requires_grad=True)
+        if bias:
+            self.v_bias = torch.nn.Parameter(data=torch.zeros(planes, self.k_eff, 1, num_classes), requires_grad=True)
 
-    def forward(self, x, u_vectors, bias_vectors):
-        # x is N x k x h
+        self.bias = bias
 
-        with torch.no_grad():
-            sign_patterns = (torch.matmul(x, u_vectors) + bias_vectors >= 0).int()
-            sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
-        
-        # N x k x P x h
-        DX = torch.mul(sign_patterns, x.unsqueeze(2))
-        N  = DX.shape[0]
-        P = DX.shape[2]
-        h = DX.shape[3]
-        
-        #Sum over adjacent patches, requires first reshaping to NP x h x imh x imw
-        imh = int(np.sqrt(DX.shape[1]))
-        DX = DX.permute(0, 2, 3, 1) # N x P x h x k
-        DX = DX.reshape((N*P, h, imh, imh)) # NP x h x imh x imw
-        
-        DX = torch.nn.functional.avg_pool2d(DX, self.avg_size) # NP x h x sqrt(k_eff) x sqrt(k_eff)
-        DX = DX.reshape((N, P, h, self.k_eff)) # N x P x h x k_eff
-        
-        # P x k_eff x N x C
-        DXv_w = torch.matmul(DX.permute(1, 3, 0, 2), self.v) + self.v_bias
-        DXv_w = DXv_w.permute(2, 0, 1, 3) # N x P x k_eff x C
-        y_pred = torch.sum(DXv_w, dim=(1, 2)) # N x C
-        
-        return y_pred
+        self.u_vectors, self.bias_vectors = generate_sign_patterns(planes, kernel_size, h, k,
+                                                                  bias, in_planes, sparsity)
 
 
-class block_conv(nn.Module):
-    expansion = 1
-    def __init__(self, in_planes, planes,downsample=False,batchn=True):
-        super(block_conv, self).__init__()
-        self.downsample = downsample
-        if downsample:
-            self.down = psi(2)
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        if batchn:
-            self.bn1 = nn.BatchNorm2d(planes)
-        else:
-            self.bn1 = identity()  # Identity
+        self.u_vectors = self.u_vectors.to('cuda')
+        self.bias_vectors = self.bias_vectors.to('cuda')
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.unf = nn.Unfold(kernel_size=kernel_size, padding=padding)
+        self.in_size = in_size
+        self.feat_indices = np.random.choice(np.arange(self.P*num_classes), size=[self.P])
 
-    def forward(self, x):
+#    def _forward_helper(self, x):
+#        # first downsample
+#        if self.downsample:
+#            x = self.down(x)
+#
+#        # then flatten to obtain shape N x k x h
+#        x = self.unf(x).permute(0, 2, 1)
+#
+#        with torch.no_grad():
+#            sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
+#            sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
+#       
+#        # N x k x P x h
+#        DX = torch.mul(sign_patterns, x.unsqueeze(2))
+#        
+#        #Sum over adjacent patches, requires first reshaping to NP x h x imh x imw
+#        DX = DX.permute(0, 2, 3, 1) # N x P x h x k
+#
+#        return DX
+    def _forward_helper(self, x):
+        # first downsample
         if self.downsample:
             x = self.down(x)
-        out = F.relu(self.bn1(self.conv1(x)))
-        return out
+
+        # then flatten to obtain shape N x k x h
+        x = self.unf(x).permute(0, 2, 1)
+
+        with torch.no_grad():
+            #sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
+            sign_patterns = (torch.matmul(x, self.u_vectors) + self.bias_vectors >= 0).int()
+            sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
+
+        # P x k x N x C
+        Xv_w = torch.matmul(x.permute(1,0,2), torch.tile(torch.repeat_interleave(self.v, self.avg_size,dim=1), (1, self.avg_size, 1, 1)))
+        if self.bias:
+            Xv_w += torch.tile(torch.repeat_interleave(self.v_bias, self.avg_size, dim=1), (1, self.avg_size, 1, 1))
+        
+        DXv_w = torch.mul(sign_patterns, Xv_w.permute(2, 1, 0, 3)).permute(0, 2, 3, 1) #  N x P x C x k
+
+        return DXv_w
+
+    def forward(self, x):
+#        DX = self._forward_helper(x)
+#        N = DX.shape[0]
+#        DX = DX.reshape((N*self.P, self.h, self.in_size, self.in_size)) # NP x h x imh x imw
+#        
+#        DX = torch.nn.functional.avg_pool2d(DX, self.avg_size) # NP x h x sqrt(k_eff) x sqrt(k_eff)
+#        DX = DX.reshape((N, self.P, self.h, self.k_eff)) # N x P x h x k_eff
+#        
+#        # P x k_eff x N x C
+#        DXv_w = torch.matmul(DX.permute(1, 3, 0, 2), self.v)
+#        if self.bias:
+#            DXv_w += self.v_bias
+
+        DXv_w = self._forward_helper(x)
+
+        y_pred = torch.sum(DXv_w, dim=(1, 3))/self.avg_size**2 # N x C
+        return y_pred
+
+    def forward_next_stage(self, x):
+        next_representation = None
+        with torch.no_grad():
+            DXv_w = self._forward_helper(x)
+
+            if self.feat_aggregate == 'none':
+                # N x PC x imh x imw
+                next_representation = DXv_w.reshape((DXv_w.shape[0], self.P*self.num_classes, self.out_size, self.out_size))
+
+            elif self.feat_aggregate == 'random':
+                next_representation = DXv_w.reshape((DXv_w.shape[0], self.P*self.num_classes, self.out_size, self.out_size))
+                next_representation = next_representation[:, self.feat_indices, :, :]
+
+
+        return next_representation
 
 class psi(nn.Module):
     def __init__(self, block_size):
@@ -137,30 +188,33 @@ class psi2(nn.Module):
 
 
 class convexGreedyNet(nn.Module):
-    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True):
+    def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
+                 in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random'):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
-        self.down_sampling = psi(downsampling)
-        self.downsample_init = downsampling
-        self.conv1 = nn.Conv2d(3 * downsampling * downsampling, self.in_planes, kernel_size=3, stride=1, padding=1,
-                               bias=not batchnorm)
 
-        if batchnorm:
-            self.bn1 = nn.BatchNorm2d(self.in_planes)
-        else:
-            self.bn1 = identity()  # Identity
-        self.RELU = nn.ReLU()
         self.blocks = []
         self.block = block
-        self.blocks.append(nn.Sequential(self.conv1, self.bn1, self.RELU))  # n=0
         self.batchn = batchnorm
-        for n in range(num_blocks - 1):
+        
+        in_planes = 3
+        next_in_planes = self.in_planes
+
+        for n in range(num_blocks):
             if n in downsample:
                 pre_factor = 4
-                self.blocks.append(block(self.in_planes * pre_factor, self.in_planes * 2,downsample=True, batchn=batchnorm))
-                self.in_planes = self.in_planes * 2
+                self.blocks.append(block(in_planes * pre_factor, next_in_planes * 2, in_size, kernel_size=3,
+                                         padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
+                                         downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate))
+                next_in_planes = next_in_planes * 2
+                in_size = in_size // 2
+                avg_size = avg_size // 2
             else:
-                self.blocks.append(block(self.in_planes, self.in_planes,batchn=batchnorm))
+                self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=3,
+                                         padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
+                                         downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate))
+            
+            in_planes = next_in_planes
 
         self.blocks = nn.ModuleList(self.blocks)
         for n in range(num_blocks):
@@ -171,6 +225,7 @@ class convexGreedyNet(nn.Module):
         for k in range(len(self.blocks)):
             for p in self.blocks[k].parameters():
                 p.requires_grad = False
+                p.grad = None
 
         for p in self.blocks[n].parameters():
             p.requires_grad = True
@@ -180,22 +235,14 @@ class convexGreedyNet(nn.Module):
             for p in self.blocks[k].parameters():
                 p.requires_grad = True
 
-    def add_block(self, downsample=False):
-        if downsample:
-            pre_factor = 4 # the old block needs this factor 4
-            self.blocks.append(
-                self.block(self.in_planes * pre_factor, self.in_planes * 2, downsample=True, batchn=self.batchn))
-            self.in_planes = self.in_planes * 2
-        else:
-            self.blocks.append(self.block(self.in_planes, self.in_planes,batchn=self.batchn))
-
     def forward(self, a):
         x = a[0]
         N = a[1]
         out = x
-        if self.downsample_init > 1:
-            out = self.down_sampling(x)
         for n in range(N + 1):
-            out = self.blocks[n](out)
+            if n < N:
+                out = self.blocks[n].forward_next_stage(out).detach()
+            else:
+                out = self.blocks[n](out)
         return out
 
