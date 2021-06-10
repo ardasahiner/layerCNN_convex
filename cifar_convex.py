@@ -30,14 +30,14 @@ parser.add_argument('--lr', default=1e-2, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
-parser.add_argument('--epochdecay',  default=20,type=int, help='number of epochs')
+parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
-parser.add_argument('--feature_size',  default=64,type=int, help='feature size')
+parser.add_argument('--feature_size',  default=32,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
 parser.add_argument('--nlin',  default=0,type=int, help='nlin')
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
-parser.add_argument('--batch_size', default=5,type=int,help='batch size')
+parser.add_argument('--batch_size', default=75,type=int,help='batch size')
 parser.add_argument('--bn', default=0,type=int,help='use batchnorm')
 parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
@@ -50,6 +50,8 @@ parser.add_argument('--sparsity', default=0.0, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--feat_agg', default='random', type=str,
                         help='way to aggregate features from layer to layer')
+parser.add_argument('--multi_gpu', default=0, type=int,
+                        help='use multiple gpus')
 parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
 
 args = parser.parse_args()
@@ -61,6 +63,7 @@ if args.sparsity == 0:
 
 assert args.bn == False, 'batch norm not yet implemented'
 args.debug_parameters = args.debug_parameters > 0
+args.multi_gpu = args.multi_gpu > 0
 
 if args.debug:
     args.nepochs = 1 # we run just one epoch per greedy layer training in debug mode
@@ -122,6 +125,9 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
 
+
+if args.multi_gpu:
+    net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
 cudnn.benchmark = True
 
@@ -133,7 +139,10 @@ def train_classifier(epoch,n):
     print('\nSubepoch: %d' % epoch)
     net.train()
     for k in range(n):
-        net.blocks[k].eval()
+        if args.multi_gpu:
+            net.module.blocks[k].eval()
+        else:
+            net.blocks[k].eval()
 
 
     if args.debug_parameters:
@@ -141,7 +150,10 @@ def train_classifier(epoch,n):
         import copy
         #store all parameters on cpu as numpy array
         net_cpu = copy.deepcopy(net).cpu()
-        net_cpu_dict = net_cpu.state_dict()
+        if args.multi_gpu:
+            net_cpu.module.state_dict()
+        else:
+            net_cpu_dict = net_cpu.state_dict()
         with open(debug_log_txt, "a") as text_file:
             print('n: %d'%n)
             for param in net_cpu_dict.keys():
@@ -166,8 +178,10 @@ def train_classifier(epoch,n):
         loss_pers=0
 
         if args.debug_parameters:
-
-            s_dict = net.state_dict()
+            if args.multi_gpu:
+                s_dict = net.module.state_dict()
+            else:
+                s_dict = net.state_dict()
             with open(debug_log_txt, "a") as text_file:
                 print("iteration %d" % (batch_idx), file=text_file)
                 for param in s_dict.keys():
@@ -243,7 +257,10 @@ i=0
 num_ep = args.nepochs
 
 for n in range(n_cnn):
-    net.unfreezeGradient(n)
+    if args.multi_gpu:
+        net.module.unfreezeGradient(n)
+    else:
+        net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
     optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9)
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)

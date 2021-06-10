@@ -96,7 +96,7 @@ class custom_cvx_layer(torch.nn.Module):
 
         with torch.no_grad():
             #sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
-            sign_patterns = (torch.matmul(x, self.u_vectors) + self.bias_vectors >= 0).int()
+            sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
             sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
 
         # P x k x N x C
