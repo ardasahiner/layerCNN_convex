@@ -1,6 +1,9 @@
 "Greedy layerwise cifar training"
 from __future__ import print_function
 
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -26,18 +29,18 @@ import json
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=1e-2, type=float, help='learning rate')
+parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
 parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
-parser.add_argument('--feature_size',  default=32,type=int, help='feature size')
+parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
 parser.add_argument('--nlin',  default=0,type=int, help='nlin')
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
-parser.add_argument('--batch_size', default=75,type=int,help='batch size')
+parser.add_argument('--batch_size', default=100,type=int,help='batch size')
 parser.add_argument('--bn', default=0,type=int,help='use batchnorm')
 parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
@@ -110,9 +113,9 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset_class = torchvision.datasets.CIFAR10(root='/mnt/raid3/sahiner/cifar10', train=True, download=True,transform=transform_train)
+trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root='/mnt/raid3/sahiner/cifar10', train=False, download=True, transform=transform_test)
+testset = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 # Model

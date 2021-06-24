@@ -15,9 +15,9 @@ def generate_sign_patterns(P, kernel, h, k, bias=True, n_channels=3, sparsity=No
         mask = np.random.choice([1, 0], size=(P, n_channels, kernel, kernel), p=[sparsity, 1-sparsity])
         umat = idct(idct(umat * mask, axis=0), axis=1)
     
-    umat = umat.transpose(1, 2, 3, 0).reshape((h, P))
+    #umat = umat.transpose(1, 2, 3, 0).reshape((h, P))
     umat = torch.from_numpy(umat).float()
-    biasmat = np.random.normal(0, torch.std(umat), (1, 1, P))
+    biasmat = np.random.normal(0, torch.std(umat), (P))
     
     return umat, torch.from_numpy(biasmat).float()
 
@@ -46,12 +46,12 @@ class custom_cvx_layer(torch.nn.Module):
         k = int(self.out_size**2)
         if downsample:
             self.down = psi(2)
-        self.k_eff= int(k/int(avg_size**2))
+        self.k_eff= self.out_size//self.avg_size
         
         # P x k x h x C
-        self.v = torch.nn.Parameter(data=torch.zeros(planes, self.k_eff, h, num_classes), requires_grad=True)
+        self.v = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size), requires_grad=True)
         if bias:
-            self.v_bias = torch.nn.Parameter(data=torch.zeros(planes, self.k_eff, 1, num_classes), requires_grad=True)
+            self.v_bias = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff), requires_grad=True)
 
         self.bias = bias
 
@@ -66,79 +66,49 @@ class custom_cvx_layer(torch.nn.Module):
         self.unf = nn.Unfold(kernel_size=kernel_size, padding=padding)
         self.in_size = in_size
         self.feat_indices = np.random.choice(np.arange(self.P*num_classes), size=[self.P])
+        self.downsample_data = psi3(self.k_eff, self.padding)
+        self.downsample_patterns = psi3(self.k_eff)
 
-#    def _forward_helper(self, x):
-#        # first downsample
-#        if self.downsample:
-#            x = self.down(x)
-#
-#        # then flatten to obtain shape N x k x h
-#        x = self.unf(x).permute(0, 2, 1)
-#
-#        with torch.no_grad():
-#            sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
-#            sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
-#       
-#        # N x k x P x h
-#        DX = torch.mul(sign_patterns, x.unsqueeze(2))
-#        
-#        #Sum over adjacent patches, requires first reshaping to NP x h x imh x imw
-#        DX = DX.permute(0, 2, 3, 1) # N x P x h x k
-#
-#        return DX
     def _forward_helper(self, x):
         # first downsample
         if self.downsample:
             x = self.down(x)
 
-        # then flatten to obtain shape N x k x h
-        x = self.unf(x).permute(0, 2, 1)
-
         with torch.no_grad():
-            #sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
-            sign_patterns = (torch.matmul(x, self.u_vectors.to(x.device)) + self.bias_vectors.to(x.device) >= 0).int()
-            sign_patterns = sign_patterns.unsqueeze(3) # N x k x P x 1
+            sign_patterns = (F.conv2d(x, self.u_vectors, bias=self.bias_vectors, padding=self.padding) >= 0).float() # n x P x out_size * out_size
 
-        # P x k x N x C
-        Xv_w = torch.matmul(x.permute(1,0,2), torch.tile(torch.repeat_interleave(self.v, self.avg_size,dim=1), (1, self.avg_size, 1, 1)))
-        if self.bias:
-            Xv_w += torch.tile(torch.repeat_interleave(self.v_bias, self.avg_size, dim=1), (1, self.avg_size, 1, 1))
+        x_downsized = self.downsample_data(x)
+        d_downsized = self.downsample_patterns(sign_patterns) # n x P*k_eff*k_eff x avg_size x avg_size
         
-        DXv_w = torch.mul(sign_patterns, Xv_w.permute(2, 1, 0, 3)).permute(0, 2, 3, 1) #  N x P x C x k
-
+        # n x P*c*k_eff*k_eff x avg_size x avg_size
+        if self.bias:
+            Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, bias=self.v_bias, groups = self.k_eff*self.k_eff)
+        else:
+            Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, groups = self.k_eff*self.k_eff)
+        
+        Xv_w = Xv_w.reshape((Xv_w.shape[0], self.P, self.num_classes, self.k_eff*self.k_eff, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
+        DXv_w = d_downsized.unsqueeze(1) * Xv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
         return DXv_w
 
     def forward(self, x):
-#        DX = self._forward_helper(x)
-#        N = DX.shape[0]
-#        DX = DX.reshape((N*self.P, self.h, self.in_size, self.in_size)) # NP x h x imh x imw
-#        
-#        DX = torch.nn.functional.avg_pool2d(DX, self.avg_size) # NP x h x sqrt(k_eff) x sqrt(k_eff)
-#        DX = DX.reshape((N, self.P, self.h, self.k_eff)) # N x P x h x k_eff
-#        
-#        # P x k_eff x N x C
-#        DXv_w = torch.matmul(DX.permute(1, 3, 0, 2), self.v)
-#        if self.bias:
-#            DXv_w += self.v_bias
+        DXv_w = self._forward_helper(x) # n x c x P*k_eff*k_eff x avg_size x avg_size
 
-        DXv_w = self._forward_helper(x)
-
-        y_pred = torch.sum(DXv_w, dim=(1, 3))/self.avg_size**2 # N x C
+        y_pred = torch.sum(DXv_w, dim=(2, 3, 4))/self.avg_size**2 # N x C
         return y_pred
 
     def forward_next_stage(self, x):
         next_representation = None
         with torch.no_grad():
             DXv_w = self._forward_helper(x)
+            next_representation = DXv_w.reshape((DXv_w.shape[0], self.num_classes, self.P, self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+            next_representation = self.downsample_data.inverse(DXv_w.reshape((next_representation.shape[0], self.num_classes*self.P, -1, self.avg_size, self.avg_size))) # classes and then P representation
 
-            if self.feat_aggregate == 'none':
-                # N x PC x imh x imw
-                next_representation = DXv_w.reshape((DXv_w.shape[0], self.P*self.num_classes, self.out_size, self.out_size))
-
-            elif self.feat_aggregate == 'random':
-                next_representation = DXv_w.reshape((DXv_w.shape[0], self.P*self.num_classes, self.out_size, self.out_size))
+            if self.feat_aggregate == 'random':
                 next_representation = next_representation[:, self.feat_indices, :, :]
 
+            if self.feat_aggregate == 'max':
+                next_representation = next_representation.reshape((next_representation.shape[0], self.num_classes, self.P, self.out_size, self.out_size))
+                next_representation = torch.max(next_representation, dim=1, keepdim=False)[0]
 
         return next_representation
 
@@ -160,11 +130,18 @@ class psi(nn.Module):
         output = output.permute(0, 3, 1, 2)
         return output.contiguous()
 
+    def inverse(self, output):
+        """ Expects size (n, channels, block_size_sq, height/block_size, width/block_size)"""
+        output = output.reshape((output.shape[0], output.shape[1], self.block_size, self.block_size, output.shape[-2], output.shape[-1]))
+        output = output.permute(0, 1, 2, 4, 3, 5)
+        input = output.reshape((output.shape[0], output.shape[1], self.block_size*output.shape[3], self.block_size*output.shape[-1]))
+        return input.contiguous()
 
-class psi2(nn.Module):
-    def __init__(self, block_size):
-        super(psi2, self).__init__()
+class psi3(nn.Module):
+    def __init__(self, block_size, padding=0):
+        super(psi3, self).__init__()
         self.block_size = block_size
+        self.padding = padding
 
     def forward(self, x):
         """Expects x.shape == (batch, channel, height, width).
@@ -178,13 +155,23 @@ class psi2(nn.Module):
         if ((height % bs) != 0) or (width % bs != 0):
             raise ValueError("height and width must be divisible by block_size")
 
-        # reshape (creates a view)
-        x1 = x.reshape(batch, channel, height // bs, bs, width // bs, bs)
-        # transpose (also creates a view)
-        x2 = x1.permute(0, 3, 5, 1, 2, 4)
-        # reshape into new order (must copy and thus makes contiguous)
-        x3 = x2.reshape(batch, bs ** 2 * channel, height // bs, width // bs)
-        return x3
+        kernel_size, stride = height//bs, height//bs
+        kernel_size+= 2*self.padding
+        #patches = x.unfold(2, kernel_size, stride).unfold(3, kernel_size, stride)
+
+        unf = nn.Unfold(kernel_size, padding=self.padding, stride=stride)
+        patches = unf(x) # n x c*(kernel_size+1)^2 x block_size_sq
+
+        patches = patches.permute(0, 2, 1).contiguous().view(patches.size(0), bs*bs, -1, kernel_size, kernel_size)
+
+        return patches.reshape((patches.size(0), -1, kernel_size, kernel_size))
+    
+    def inverse(self, output):
+        """ Expects size (n, channels, block_size_sq, height/block_size, width/block_size)"""
+        output = output.reshape((output.shape[0], output.shape[1], self.block_size, self.block_size, output.shape[-2], output.shape[-1]))
+        output = output.permute(0, 1, 2, 4, 3, 5)
+        input = output.reshape((output.shape[0], output.shape[1], self.block_size*output.shape[3], self.block_size*output.shape[-1]))
+        return input.contiguous()
 
 
 class convexGreedyNet(nn.Module):
@@ -228,7 +215,6 @@ class convexGreedyNet(nn.Module):
                 p.grad = None
 
         for p in self.blocks[n].parameters():
-            print(p.shape)
             p.requires_grad = True
 
     def unfreezeAll(self):
