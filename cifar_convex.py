@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import torch
 import torch.nn as nn
@@ -51,11 +51,13 @@ parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
 parser.add_argument('--sparsity', default=0.0, type=float,
                         help='sparsity of hyperplane generating arrangements')
-parser.add_argument('--feat_agg', default='random', type=str,
+parser.add_argument('--feat_agg', default='max', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
 parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
+parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
+parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -90,8 +92,9 @@ name_log_dir = 'runs/'+name_log_dir
 
 name_log_txt = time_stamp + save_name + str(randint(0, 1000)) + args.name
 debug_log_txt = name_log_txt + '_debug.log'
-name_save_model = name_log_txt + '.t7'
+name_save_model = args.save_dir + name_log_txt
 name_log_txt=name_log_txt   +'.log'
+
 
 with open(name_log_txt, "a") as text_file:
     print(opts, file=text_file)
@@ -258,14 +261,24 @@ def test(epoch,n,ensemble=False):
 
 i=0
 num_ep = args.nepochs
+n_start = 0
 
-for n in range(n_cnn):
+# resume from previously trained checkpoint
+if args.resume and args.checkpoint_path != '':
+    checkpoint = torch.load(args.checkpoint_path)
+    if args.multi_gpu:
+        net.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        net.load_state_dict(checkpoint['model_state_dict'])
+    n_start = checkpoint['n']+1
+
+for n in range(n_start, n_cnn):
     if args.multi_gpu:
         net.module.unfreezeGradient(n)
     else:
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
-    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9)
+    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
 
     for epoch in range(0, num_ep):
@@ -290,7 +303,21 @@ for n in range(n_cnn):
     del optimizer
     del scheduler
     gc.collect()
-    torch.cuda.empty_cache() 
+    torch.cuda.empty_cache()
+
+    curr_sv_model = name_save_model + '_' + str(n) + '.pt'
+    print('saving checkpoint')
+    if args.multi_gpu:
+        torch.save({
+                'n': n,
+                'model_state_dict': net.module.state_dict(),
+                }, curr_sv_model)
+    else:
+        torch.save({
+                'n': n,
+                'model_state_dict': net.state_dict(),
+                }, curr_sv_model)
+
 
 state_final = {
             'net': net,
