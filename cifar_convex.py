@@ -33,7 +33,7 @@ parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
-parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
+parser.add_argument('--epochdecay',  default=20,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
@@ -49,7 +49,7 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
 parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
-parser.add_argument('--sparsity', default=0.0, type=float,
+parser.add_argument('--sparsity', default=0.3, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--feat_agg', default='max', type=str,
                         help='way to aggregate features from layer to layer')
@@ -58,6 +58,7 @@ parser.add_argument('--multi_gpu', default=0, type=int,
 parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
+parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -136,6 +137,8 @@ if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
 cudnn.benchmark = True
+if args.deterministic:
+    torch.use_deterministic_algorithms(True)
 
 criterion_classifier = nn.CrossEntropyLoss()
 
@@ -174,7 +177,6 @@ def train_classifier(epoch,n):
             inputs, targets = inputs.cuda(), targets.cuda()
 
         optimizer.zero_grad()
-        inputs, targets = Variable(inputs), Variable(targets)
         outputs = net.forward([inputs,n])
 
         # TODO: add appropriate group norm regularizer
@@ -205,6 +207,16 @@ def train_classifier(epoch,n):
     acc = 100.*float(correct)/float(total)
     return acc
 
+n_start = 0
+
+# resume from previously trained checkpoint
+if args.resume and args.checkpoint_path != '':
+    checkpoint = torch.load(args.checkpoint_path)
+    if args.multi_gpu:
+        net.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        net.load_state_dict(checkpoint['model_state_dict'])
+    n_start = checkpoint['n']+1
 all_outs = [[] for i in range(args.ncnn)]
 
 def test(epoch,n,ensemble=False):
@@ -246,7 +258,7 @@ def test(epoch,n,ensemble=False):
             total_out = torch.zeros((total,10))
 
             #very lazy
-            for i in range(n+1):
+            for i in range(n_start, n+1):
                 total_out += float(weight[i])*all_outs[i]
 
 
@@ -261,18 +273,9 @@ def test(epoch,n,ensemble=False):
 
 i=0
 num_ep = args.nepochs
-n_start = 0
-
-# resume from previously trained checkpoint
-if args.resume and args.checkpoint_path != '':
-    checkpoint = torch.load(args.checkpoint_path)
-    if args.multi_gpu:
-        net.module.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        net.load_state_dict(checkpoint['model_state_dict'])
-    n_start = checkpoint['n']+1
 
 for n in range(n_start, n_cnn):
+    #print(n)
     if args.multi_gpu:
         net.module.unfreezeGradient(n)
     else:
@@ -304,19 +307,21 @@ for n in range(n_start, n_cnn):
     del scheduler
     gc.collect()
     torch.cuda.empty_cache()
+    #if n %2 == 1:
+    #    args.lr /= 5
 
     curr_sv_model = name_save_model + '_' + str(n) + '.pt'
-    print('saving checkpoint')
-    if args.multi_gpu:
-        torch.save({
-                'n': n,
-                'model_state_dict': net.module.state_dict(),
-                }, curr_sv_model)
-    else:
-        torch.save({
-                'n': n,
-                'model_state_dict': net.state_dict(),
-                }, curr_sv_model)
+    #print('saving checkpoint')
+    #if args.multi_gpu:
+    #    torch.save({
+    #            'n': n,
+    #            'model_state_dict': net.module.state_dict(),
+    #            }, curr_sv_model)
+    #else:
+    #    torch.save({
+    #            'n': n,
+    #            'model_state_dict': net.state_dict(),
+    #            }, curr_sv_model)
 
 
 state_final = {

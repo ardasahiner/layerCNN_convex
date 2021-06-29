@@ -66,7 +66,7 @@ if args.seed is not None:
     torch.cuda.manual_seed_all(seed)
 
 
-save_name = 'layersize_'+str(args.feature_size)+'width_' \
+save_name = 'nonconvex_layersize_'+str(args.feature_size)+'width_' \
             + str(args.width_aux) + 'depth_' + str(args.nlin) + 'ds_type_' + str(args.ds_type) +'down_' +  args.down 
 #logging
 time_stamp = str(datetime.datetime.now().isoformat())
@@ -100,10 +100,10 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset_class = torchvision.datasets.CIFAR10(root='.', train=True, download=True,transform=transform_train)
+trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root='.', train=False, download=True, transform=transform_test)
-testloader = torch.utils.data.DataLoader(testset, batch_size=256, shuffle=False, num_workers=2)
+testset = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=False, download=True, transform=transform_test)
+testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 # Model
 
@@ -185,7 +185,7 @@ def train_classifier(epoch,n):
                     diff = np.sum((s_dict[param].cpu().numpy()-net_cpu_dict[param])**2)
                     print("n: %d parameter: %s size: %s changed by %.5f" % (n,param,net_cpu_dict[param].shape,diff),file=text_file)
 
-        train_loss += loss.data[0]
+        train_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += predicted.eq(targets.data).cpu().sum()
@@ -216,7 +216,7 @@ def test(epoch,n,ensemble=False):
 
         loss = criterion_classifier(outputs, targets)
 
-        test_loss += loss.data[0]
+        test_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += predicted.eq(targets.data).cpu().sum()
