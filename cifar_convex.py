@@ -51,7 +51,7 @@ parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
 parser.add_argument('--sparsity', default=0.1, type=float,
                         help='sparsity of hyperplane generating arrangements')
-parser.add_argument('--feat_agg', default='max', type=str,
+parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
