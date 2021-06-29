@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ import json
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
+parser.add_argument('--lr', default=2e-3, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -49,7 +49,7 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
 parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
-parser.add_argument('--sparsity', default=0.3, type=float,
+parser.add_argument('--sparsity', default=0.1, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--feat_agg', default='max', type=str,
                         help='way to aggregate features from layer to layer')
