@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ import json
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
+parser.add_argument('--lr', default=2e-3, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -37,7 +37,6 @@ parser.add_argument('--epochdecay',  default=20,type=int, help='number of epochs
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
-parser.add_argument('--nlin',  default=0,type=int, help='nlin')
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
 parser.add_argument('--batch_size', default=100,type=int,help='batch size')
@@ -46,12 +45,11 @@ parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
 parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
                     help='number of data loading workers (default: 6)')
-parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
 parser.add_argument('--sparsity', default=0.1, type=float,
                         help='sparsity of hyperplane generating arrangements')
-parser.add_argument('--feat_agg', default='max', type=str,
+parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
@@ -59,7 +57,7 @@ parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random s
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
-parser.add_argument('--optimizer', '-opt', default='SGD', type=str, help='Optimizer to use')
+parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -84,8 +82,7 @@ if args.seed is not None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-save_name = 'convex_layersize_'+str(args.feature_size)+'width_' \
-            + str(args.width_aux) + 'depth_' + str(args.nlin) + 'ds_type_' + str(args.ds_type) +'down_' +  args.down 
+save_name = 'convex_layersize_'+str(args.feature_size) +'down_' +  args.down 
 #logging
 time_stamp = str(datetime.datetime.now().isoformat())
 
@@ -177,27 +174,13 @@ def train_classifier(epoch,n):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
 
-        if args.optimizer=='LBFGS':
-            with torch.no_grad():
-                outputs = net.forward([inputs,n])
-                loss = criterion_classifier(outputs, targets)
-            def closure():
-                if torch.is_grad_enabled():
-                    optimizer.zero_grad()
-                outputs = net.forward([inputs,n])
-                loss = criterion_classifier(outputs, targets)
-                if loss.requires_grad:
-                    loss.backward()
-                return loss
-            optimizer.step(closure)
-        else:
-            optimizer.zero_grad()
-            outputs = net.forward([inputs,n])
+        optimizer.zero_grad()
+        outputs = net.forward([inputs,n])
 
-            # TODO: add appropriate group norm regularizer
-            loss = criterion_classifier(outputs, targets)
-            loss.backward()
-            optimizer.step()
+        # TODO: add appropriate group norm regularizer
+        loss = criterion_classifier(outputs, targets)
+        loss.backward()
+        optimizer.step()
         loss_pers=0
 
         if args.debug_parameters:
@@ -218,6 +201,7 @@ def train_classifier(epoch,n):
 
         progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
             % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
+
 
     acc = 100.*float(correct)/float(total)
     return acc
@@ -290,22 +274,14 @@ i=0
 num_ep = args.nepochs
 
 for n in range(n_start, n_cnn):
-    print('stage', n)
+    print('training stage', n)
     if args.multi_gpu:
         net.module.unfreezeGradient(n)
     else:
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
 
-    if args.optimizer=='SGD':
-        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
-    elif args.optimizer=='Adam':
-        optimizer = optim.AdamW(to_train, lr=args.lr,weight_decay=1e-4)
-    elif args.optimizer=='Adagrad':
-        optimizer = optim.Adagrad(to_train, lr=args.lr,weight_decay=1e-4)
-    elif args.optimizer=='LBFGS':
-        optimizer = optim.LBFGS(to_train, lr=args.lr, max_iter=20, history_size=10, line_search_fn='strong_wolfe')
-
+    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
 
     for epoch in range(0, num_ep):
@@ -331,21 +307,20 @@ for n in range(n_start, n_cnn):
     del scheduler
     gc.collect()
     torch.cuda.empty_cache()
-    #if n %2 == 1:
-    #    args.lr /= 5
 
-    curr_sv_model = name_save_model + '_' + str(n) + '.pt'
-    #print('saving checkpoint')
-    #if args.multi_gpu:
-    #    torch.save({
-    #            'n': n,
-    #            'model_state_dict': net.module.state_dict(),
-    #            }, curr_sv_model)
-    #else:
-    #    torch.save({
-    #            'n': n,
-    #            'model_state_dict': net.state_dict(),
-    #            }, curr_sv_model)
+    if args.save_checkpoint:
+        curr_sv_model = name_save_model + '_' + str(n) + '.pt'
+        print('saving checkpoint')
+        if args.multi_gpu:
+            torch.save({
+                    'n': n,
+                    'model_state_dict': net.module.state_dict(),
+                    }, curr_sv_model)
+        else:
+            torch.save({
+                    'n': n,
+                    'model_state_dict': net.state_dict(),
+                    }, curr_sv_model)
 
 
 state_final = {
