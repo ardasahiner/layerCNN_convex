@@ -40,14 +40,13 @@ class custom_cvx_layer(torch.nn.Module):
         self.downsample = downsample
         if downsample:
             self.down = psi(2)
-            in_size = in_size // 2
 
         self.out_size = (in_size+ 2*padding - kernel_size + 1) # assumes a stride and dilation of 1
         k = int(self.out_size**2)
         if downsample:
             self.down = psi(2)
         self.k_eff= self.out_size//self.avg_size
-        
+
         # P x k x h x C
         self.v = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size)/(kernel_size**2*in_planes*planes), requires_grad=True)
         if bias:
@@ -99,7 +98,6 @@ class custom_cvx_layer(torch.nn.Module):
 
     def forward(self, x):
         DXv_w = self._forward_helper(x) # n x c x P*k_eff*k_eff x avg_size x avg_size
-
         y_pred = torch.sum(DXv_w, dim=(2, 3, 4))/self.avg_size**2 # N x C
         return y_pred
     
@@ -113,8 +111,6 @@ class custom_cvx_layer(torch.nn.Module):
             aggregate_v = self.v.reshape((self.P, self.num_classes, self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size)).permute(0, 2, 1, 3, 4, 5)
             aggregate_v = self.v.reshape((self.P*self.k_eff*self.k_eff, self.num_classes, -1)).permute(0, 2, 1) # P*k^2 x spatial dims x c
             u, s, v = torch.svd(aggregate_v)
-            print(u.shape)
-            print(s.shape)
             aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
             self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
             aggregate_v_bias = torch.norm(self.v_bias.reshape((self.P, self.num_classes, self.k_eff*self.k_eff)), dim=1)
@@ -247,12 +243,12 @@ class convexGreedyNet(nn.Module):
         for n in range(num_blocks):
             if n in downsample:
                 pre_factor = 4
-                self.blocks.append(block(in_planes * pre_factor, next_in_planes * 2, in_size, kernel_size=3,
+                avg_size = avg_size // 2
+                in_size = in_size // 2
+                self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate))
-                next_in_planes = next_in_planes * 2
-                in_size = in_size // 2
-                avg_size = avg_size // 2
+                # next_in_planes = next_in_planes * 2
             else:
                 self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
