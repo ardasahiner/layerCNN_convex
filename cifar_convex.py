@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import torch
 import torch.nn as nn
@@ -49,7 +49,7 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
 parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
-parser.add_argument('--sparsity', default=0.3, type=float,
+parser.add_argument('--sparsity', default=0.1, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--feat_agg', default='max', type=str,
                         help='way to aggregate features from layer to layer')
@@ -59,6 +59,7 @@ parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random s
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
+parser.add_argument('--optimizer', '-opt', default='SGD', type=str, help='Optimizer to use')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -176,13 +177,27 @@ def train_classifier(epoch,n):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
 
-        optimizer.zero_grad()
-        outputs = net.forward([inputs,n])
+        if args.optimizer=='LBFGS':
+            with torch.no_grad():
+                outputs = net.forward([inputs,n])
+                loss = criterion_classifier(outputs, targets)
+            def closure():
+                if torch.is_grad_enabled():
+                    optimizer.zero_grad()
+                outputs = net.forward([inputs,n])
+                loss = criterion_classifier(outputs, targets)
+                if loss.requires_grad:
+                    loss.backward()
+                return loss
+            optimizer.step(closure)
+        else:
+            optimizer.zero_grad()
+            outputs = net.forward([inputs,n])
 
-        # TODO: add appropriate group norm regularizer
-        loss = criterion_classifier(outputs, targets)
-        loss.backward()
-        optimizer.step()
+            # TODO: add appropriate group norm regularizer
+            loss = criterion_classifier(outputs, targets)
+            loss.backward()
+            optimizer.step()
         loss_pers=0
 
         if args.debug_parameters:
@@ -275,13 +290,22 @@ i=0
 num_ep = args.nepochs
 
 for n in range(n_start, n_cnn):
-    #print(n)
+    print('stage', n)
     if args.multi_gpu:
         net.module.unfreezeGradient(n)
     else:
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
-    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
+
+    if args.optimizer=='SGD':
+        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
+    elif args.optimizer=='Adam':
+        optimizer = optim.AdamW(to_train, lr=args.lr,weight_decay=1e-4)
+    elif args.optimizer=='Adagrad':
+        optimizer = optim.Adagrad(to_train, lr=args.lr,weight_decay=1e-4)
+    elif args.optimizer=='LBFGS':
+        optimizer = optim.LBFGS(to_train, lr=args.lr, max_iter=20, history_size=10, line_search_fn='strong_wolfe')
+
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
 
     for epoch in range(0, num_ep):

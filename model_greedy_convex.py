@@ -73,6 +73,9 @@ class custom_cvx_layer(torch.nn.Module):
         self.aggregate_v_bias = torch.nn.Parameter(data=torch.zeros(planes*self.k_eff*self.k_eff), requires_grad=True)
         self.aggregated = False
 
+        # torch.nn.init.xavier_uniform_(self.v)
+
+
     def _forward_helper(self, x):
         # first downsample
         if self.downsample:
@@ -117,8 +120,10 @@ class custom_cvx_layer(torch.nn.Module):
             print(s.shape)
             aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
             self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
-            aggregate_v_bias = torch.norm(self.v_bias.reshape((self.P, self.num_classes, self.k_eff*self.k_eff)), dim=1)
+            aggregate_v_bias = torch.max(self.v_bias.reshape((self.P, self.num_classes, self.k_eff*self.k_eff, -1)), dim=1, keepdim=False)[0]
             self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
+            #aggregate_v_bias = torch.norm(self.v_bias.reshape((self.P, self.num_classes, self.k_eff*self.k_eff)), dim=1)
+            #self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
 
         self.aggregated = True
 
@@ -135,10 +140,10 @@ class custom_cvx_layer(torch.nn.Module):
         d_downsized = self.downsample_patterns(sign_patterns) # n x P*k_eff*k_eff x avg_size x avg_size
 
         # n x P*c*k_eff*k_eff x avg_size x avg_size
-        if self.bias:
-            Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, bias=self.aggregate_v_bias, groups = self.k_eff*self.k_eff)
-        else:
-            Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, groups = self.k_eff*self.k_eff)
+        #if self.bias:
+        #    Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, bias=self.aggregate_v_bias, groups = self.k_eff*self.k_eff)
+        #else:
+        Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, groups = self.k_eff*self.k_eff)
 
         DXv_w = d_downsized * Xv_w
         next_representation = self.downsample_data.inverse(DXv_w.reshape((DXv_w.shape[0],self.P, -1, self.avg_size, self.avg_size)))
