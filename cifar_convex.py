@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import torch
 import torch.nn as nn
@@ -322,10 +322,3 @@ for n in range(n_start, n_cnn):
                     'model_state_dict': net.state_dict(),
                     }, curr_sv_model)
 
-
-state_final = {
-            'net': net,
-            'acc_test': acc_test,
-            'acc_train': acc_train,
-        }
-torch.save(state_final,save_name)
