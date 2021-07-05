@@ -1,6 +1,10 @@
 "Greedy layerwise cifar training"
 from __future__ import print_function
 
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,6 +18,7 @@ import os
 import argparse
 
 from model_greedy import *
+from model_greedy_separable import *
 from torch.autograd import Variable
 
 from utils import progress_bar
@@ -31,9 +36,9 @@ parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
 parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
-parser.add_argument('--feature_size',  default=128,type=int, help='feature size')
+parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
-parser.add_argument('--nlin',  default=2,type=int, help='nlin')
+parser.add_argument('--nlin',  default=0,type=int, help='nlin')
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
 parser.add_argument('--batch_size', default=128,type=int,help='batch size')
@@ -46,6 +51,7 @@ parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[1,2]', type=str,
                         help='layer at which to downsample')
 parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
+parser.add_argument('--separable', action='store_true', help='Whether to train a class-wise separable architecture')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -114,7 +120,10 @@ n_cnn=args.ncnn
 #else:
  #   from functools import partial
   #  block_conv_ = partial(ds_conv, ds_type=args.ds_type)
-net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
+if args.separable:
+    net = separableGreedyNet(separable_block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
+else:
+    net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
     
 
 if args.width_aux:
@@ -122,9 +131,15 @@ if args.width_aux:
 else:
     num_feat = args.feature_size
 
-net_c = auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
-                             n_lin=args.nlin, feature_size=num_feat,
-                             input_features=args.feature_size, batchn=args.bn)
+if args.separable:
+    net_c = separable_auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
+                                 n_lin=args.nlin, feature_size=num_feat,
+                                 input_features=args.feature_size, batchn=args.bn)
+
+else:
+    net_c = auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
+                                 n_lin=args.nlin, feature_size=num_feat,
+                                 input_features=args.feature_size, batchn=args.bn)
 
 
 with open(name_log_txt, "a") as text_file:
@@ -211,10 +226,10 @@ def test(epoch,n,ensemble=False):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
 
-        inputs, targets = Variable(inputs, volatile=True), Variable(targets)
-        outputs = net([inputs,n])
+        with torch.no_grad():
+            outputs = net([inputs,n])
 
-        loss = criterion_classifier(outputs, targets)
+            loss = criterion_classifier(outputs, targets)
 
         test_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
@@ -285,8 +300,10 @@ for n in range(n_cnn):
     if args.down and n in downsample:
         args.avg_size = int(args.avg_size/2)
         in_size = int(in_size/2)
-        args.feature_size = int(args.feature_size*2)
-        args.width_aux = args.width_aux * 2
+
+        if not args.separable:
+            args.feature_size = int(args.feature_size*2)
+            args.width_aux = args.width_aux * 2
 
     if args.width_aux:
         num_feat = args.width_aux
@@ -295,10 +312,17 @@ for n in range(n_cnn):
 
     net_c = None
     if n < n_cnn-1:
-        net_c = auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
-                                     n_lin=args.nlin, feature_size=args.width_aux,
-                                     input_features=args.feature_size, batchn=args.bn).cuda()
-        net.module[0].add_block(n in downsample)
+        if args.separable:
+            net_c = separable_auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
+                                         n_lin=args.nlin, feature_size=args.width_aux,
+                                         input_features=args.feature_size, batchn=args.bn).cuda()
+            net.module[0].add_block(in_size, args.avg_size, n in downsample)
+
+        else:
+            net_c = auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
+                                         n_lin=args.nlin, feature_size=args.width_aux,
+                                         input_features=args.feature_size, batchn=args.bn).cuda()
+            net.module[0].add_block(n in downsample)
         net = torch.nn.DataParallel(nn.Sequential(net.module[0], net_c)).cuda()
 
 state_final = {

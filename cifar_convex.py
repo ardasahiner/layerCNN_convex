@@ -281,7 +281,7 @@ for n in range(n_start, n_cnn):
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
 
-    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-4)
+    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
 
     for epoch in range(0, num_ep):
@@ -301,7 +301,6 @@ for n in range(n_start, n_cnn):
             break
 
         scheduler.step()
-    
     del to_train
     del optimizer
     del scheduler
