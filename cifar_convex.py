@@ -58,6 +58,8 @@ parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
+parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
+parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -115,9 +117,9 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
+trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=False, download=True, transform=transform_test)
+testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 # Model
@@ -177,7 +179,7 @@ def train_classifier(epoch,n):
         optimizer.zero_grad()
         outputs = net.forward([inputs,n])
 
-        # TODO: add appropriate group norm regularizer
+        # TODO: add appropriate group norm regularizer if desired
         loss = criterion_classifier(outputs, targets)
         loss.backward()
         optimizer.step()
@@ -281,8 +283,11 @@ for n in range(n_start, n_cnn):
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
 
-    optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
+    if args.optimizer == 'SGD':
+        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-5)
+    elif args.optimizer == 'Adam':
+        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
 
     for epoch in range(0, num_ep):
         acc_train = train_classifier(epoch,n)
@@ -301,11 +306,15 @@ for n in range(n_start, n_cnn):
             break
 
         scheduler.step()
+    
     del to_train
     del optimizer
     del scheduler
     gc.collect()
     torch.cuda.empty_cache()
+
+    # decay the learning rate at each stage
+    args.lr /= 100
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'

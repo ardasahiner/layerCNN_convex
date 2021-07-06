@@ -2,6 +2,15 @@ Layerwise Learned Convex CNN
 
 This is code built originally the paper https://arxiv.org/abs/1812.11446. It builds upon this paper by using equivalent convex formulations of neural networks as proposed originally in Pilanci and Ergen, ICML 2020. This repo is currently a work in progress. 
 
+The current state can be run simply by
+
+```
+python cifar_convex.py
+```
+
+There are options if you want to save checkpoints after each stage, or load from previous checkpoints. There are options for how different features are aggregated. Also, running the original cifar.py with the --separable tag will allow you to run the 
+non-convex fully separable model which we have convexified. Training the convex program takes about 15 hours on one GPU. 
+
 ## Imagenet
 Imagenet experiments for 1-hidden layer use the standalone imagenet_single_layer.py
 
