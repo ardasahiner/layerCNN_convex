@@ -60,6 +60,9 @@ parser.add_argument('--deterministic', '-det', action='store_true', help='Determ
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
 parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
+parser.add_argument('--group_norm', action='store_true', help='Whether to use group norm penalty (otherwise, standard weight decay is used)')
+parser.add_argument('--wd', default=1e-5, type=float, help='regularization parameter')
+parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -140,9 +143,10 @@ cudnn.benchmark = True
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
-criterion_classifier = nn.CrossEntropyLoss()
-
-criterion = nn.CrossEntropyLoss()
+if args.mse:
+    criterion_classifier = nn.MSELoss()
+else:
+    criterion_classifier = nn.CrossEntropyLoss()
 
 def train_classifier(epoch,n):
     print('\nSubepoch: %d' % epoch)
@@ -152,8 +156,7 @@ def train_classifier(epoch,n):
             net.module.blocks[k].eval()
         else:
             net.blocks[k].eval()
-
-
+    
     if args.debug_parameters:
     #This is used to verify that early layers arent updated
         import copy
@@ -176,11 +179,22 @@ def train_classifier(epoch,n):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
 
+        if args.mse:
+            targets_loss = nn.functional.one_hot(targets, num_classes=10).float()
+        else:
+            targets_loss = targets
+
         optimizer.zero_grad()
         outputs = net.forward([inputs,n])
 
-        # TODO: add appropriate group norm regularizer if desired
-        loss = criterion_classifier(outputs, targets)
+        loss = criterion_classifier(outputs, targets_loss)
+
+        if args.group_norm:
+            if args.multi_gpu:
+                loss += args.wd*torch.sum(torch.norm(net.module.blocks[n].v.reshape((net.module.blocks[n].v.shape[0], -1)), dim=1))
+            else:
+                loss += args.wd*torch.sum(torch.norm(net.blocks[n].v.reshape((net.blocks[n].v.shape[0], -1)), dim=1))
+
         loss.backward()
         optimizer.step()
         loss_pers=0
@@ -234,9 +248,14 @@ def test(epoch,n,ensemble=False):
             if use_cuda:
                 inputs, targets = inputs.cuda(), targets.cuda()
 
+            if args.mse:
+                targets_loss = nn.functional.one_hot(targets, num_classes=10).float()
+            else:
+                targets_loss = targets
+
             outputs = net([inputs,n])
 
-            loss = criterion_classifier(outputs, targets)
+            loss = criterion_classifier(outputs, targets_loss)
 
             test_loss += loss.item()
             _, predicted = torch.max(outputs.detach().data, 1)
@@ -274,6 +293,10 @@ def test(epoch,n,ensemble=False):
 
 i=0
 num_ep = args.nepochs
+if args.group_norm:
+    wd = 0.0
+else:
+    wd = args.wd
 
 for n in range(n_start, n_cnn):
     print('training stage', n)
@@ -284,9 +307,9 @@ for n in range(n_start, n_cnn):
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
 
     if args.optimizer == 'SGD':
-        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=1e-5)
+        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
     elif args.optimizer == 'Adam':
-        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=1e-5)
+        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
 
     for epoch in range(0, num_ep):

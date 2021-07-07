@@ -121,7 +121,7 @@ class custom_cvx_layer(torch.nn.Module):
         self.v_bias /= (torch.sqrt(torch.squeeze(v_norms)) + 1e-8)
 
         if self.feat_aggregate == 'weight_max':
-            aggregate_v = torch.max(self.v.reshape((self.k_eff*self.k_eff, self.num_classes. self.P, -1, self.kernel_size, self.kernel_size)), dim=1, keepdim=False)[0]
+            aggregate_v = torch.max(self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)), dim=1, keepdim=False)[0]
             self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
             aggregate_v_bias = torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0]
             self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
