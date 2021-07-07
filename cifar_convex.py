@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import torch
 import torch.nn as nn
@@ -25,8 +25,6 @@ from utils import *
 from random import randint
 import datetime
 import json
-
-
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=2e-3, type=float, help='learning rate')
@@ -139,7 +137,7 @@ with open(name_log_txt, "a") as text_file:
 if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
-cudnn.benchmark = True
+# cudnn.benchmark = True
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
@@ -337,7 +335,7 @@ for n in range(n_start, n_cnn):
     torch.cuda.empty_cache()
 
     # decay the learning rate at each stage
-    args.lr /= 100
+    args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
