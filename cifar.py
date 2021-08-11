@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 
 import torch
@@ -22,27 +22,29 @@ from model_greedy_separable import *
 from torch.autograd import Variable
 
 from utils import progress_bar
+from utils import PrepareData
 
+import random
 from random import randint
 import datetime
 import json
 
-
+import dask.array as da
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
+parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
-parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
+parser.add_argument('--ncnn',  default=1,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
 parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
-parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
+parser.add_argument('--avg_size',  default=3,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
 parser.add_argument('--nlin',  default=0,type=int, help='nlin')
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
-parser.add_argument('--batch_size', default=128,type=int,help='batch size')
-parser.add_argument('--bn', default=0,type=int,help='use batchnorm')
+parser.add_argument('--batch_size', default=250,type=int,help='batch size')
+parser.add_argument('--bn', default=1,type=int,help='use batchnorm')
 parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
 parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
@@ -52,6 +54,8 @@ parser.add_argument('--down', default='[1,2]', type=str,
                         help='layer at which to downsample')
 parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--separable', action='store_true', help='Whether to train a class-wise separable architecture')
+parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
+parser.add_argument('--trunc_idx', default=-1, type=int, help='Truncation if necessary')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -63,14 +67,16 @@ if args.debug:
     args.nepochs = 1 # we run just one epoch per greedy layer training in debug mode
 
 downsample =  list(np.array(json.loads(args.down)))
-in_size=32
+in_size=12
 mode=0
 
 if args.seed is not None:
     seed = int(args.seed)
+    random.seed(a=args.seed)
+    np.random.seed(seed=seed)
+    torch.manual_seed(seed=args.seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 save_name = 'nonconvex_layersize_'+str(args.feature_size)+'width_' \
             + str(args.width_aux) + 'depth_' + str(args.nlin) + 'ds_type_' + str(args.ds_type) +'down_' +  args.down 
@@ -94,20 +100,73 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 # Data
 print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+if args.trunc_idx > 0:
+    print('==> Preparing data..')
+    train_dataset = torchvision.datasets.CIFAR10(
+        '/mnt/dense/sahiner', train=True, download=True,
+        transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ]))
+
+    dummy_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=50000, shuffle=False,
+            pin_memory=True, sampler=None)
+
+    print('loading train data')
+    for A, y in dummy_loader:
+        break
+
+    kernel_size = 3
+    padding =2
+    stride = 3
+    unf = nn.Unfold(kernel_size=kernel_size, padding=padding,stride=stride)
+    A_conv = unf(A).permute(0, 2, 1)
+
+    n, k, h= A_conv.shape
+    M = A_conv.reshape((-1, kernel_size*kernel_size*3))
+    
+    train_means = torch.mean(M, dim=0)
+    M = M - train_means
+    
+    M_da = da.from_array(M.numpy())
+    u, s, v = da.linalg.svd(M_da)
+
+    # whiten the dataset
+    print('whitening...')
+    if args.trunc_idx > 0:
+        u = u[:, :args.trunc_idx]
+        s = s[:args.trunc_idx]
+        v = v[:args.trunc_idx, :]
+
+    print('computing svd')
+    u = torch.from_numpy(u.compute())
+    s = torch.from_numpy(s.compute())
+    v = torch.from_numpy(v.compute())
+    print('forming new dataset')
+    A_train = (u @ torch.diag(s) @ v + train_means).reshape((n, k, -1))
+
+    fold = nn.Fold(output_size=32, padding=padding, kernel_size=kernel_size, stride=stride)
+    A_train = fold(A_train.permute(0, 2,1))
+    
+    trainset_class = PrepareData(A_train, y)
+    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+else:
+    transform_train = transforms.Compose([
+        #transforms.RandomCrop(32, padding=4),
+        #transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
+    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
 
 transform_test = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
-trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
 testset = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
@@ -148,6 +207,8 @@ with open(name_log_txt, "a") as text_file:
 
 net = torch.nn.DataParallel(nn.Sequential(net,net_c)).cuda()
 cudnn.benchmark = True
+if args.deterministic:
+    torch.use_deterministic_algorithms(True)
 
 criterion_classifier = nn.CrossEntropyLoss()
 
@@ -270,15 +331,16 @@ num_ep = args.nepochs
 
 for n in range(n_cnn):
     net.module[0].unfreezeGradient(n)
-    lr = args.lr*5.0# we run at epoch 0 the lr reset to remove non learnable param
+    lr = args.lr*2.0# we run at epoch 0 the lr reset to remove non learnable param
 
     for epoch in range(0, num_ep):
         i=i+1
         print('n: ',n)
         if epoch % args.epochdecay == 0:
-            lr=lr/5.0
+            lr=lr/2.0
             to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
-            optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=5e-4)
+            #optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=5e-4)
+            optimizer = optim.AdamW(to_train, lr=lr, weight_decay=5e-4)
             print('new lr:',lr)
 
         acc_train = train_classifier(epoch,n)

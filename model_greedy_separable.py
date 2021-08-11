@@ -16,20 +16,21 @@ class separable_block_conv(nn.Module):
             self.down = psi(2)
 
         self.k_eff = (in_size//avg_size)*(in_size//avg_size)
-        self.conv1 = nn.Conv2d(in_planes*self.k_eff, planes*num_classes*self.k_eff, kernel_size=3, stride=1, padding=0, bias=False, groups=self.k_eff)
+        self.conv1 = nn.Conv2d(in_planes*self.k_eff, planes*num_classes*self.k_eff, kernel_size=3, stride=3, padding=0, bias=False, groups=self.k_eff)
         if batchn:
-            self.bn1 = nn.BatchNorm2d(planes*num_classes)
+            self.bn1 = nn.BatchNorm2d(planes*num_classes*self.k_eff)
         else:
             self.bn1 = identity()  # Identity
 
         self.feature_extract = False
-        self.sep = psi3(in_size//avg_size, padding=1)
+        self.sep = psi3(in_size//avg_size, 0)
         self.planes=planes
 
     def forward(self, x):
         if self.downsample:
             x = self.down(x)
 
+        x = F.pad(x, pad=(2,2,2,2))
         x = self.sep(x)
 
         out = F.relu(self.bn1(self.conv1(x))) # n x P*c*k_eff x avg_size x avg_size
@@ -150,7 +151,7 @@ class separable_auxillary_classifier(nn.Module):
         out = x
         if(self.avg_size>1):
             out = F.avg_pool2d(out, self.avg_size)
-        out = self.bn(out)
+        # out = self.bn(out)
         out = out.view(out.size(0), -1)
 
         # c x n x d

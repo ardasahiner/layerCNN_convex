@@ -13,7 +13,7 @@ class block_conv(nn.Module):
         self.downsample = downsample
         if downsample:
             self.down = psi(2)
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=3, padding=2, bias=False)
         if batchn:
             self.bn1 = nn.BatchNorm2d(planes)
         else:
@@ -122,9 +122,6 @@ class psi2(nn.Module):
         return x3
 
 
-
-
-
 class auxillary_classifier(nn.Module):
     def __init__(self,avg_size=16,feature_size=256,input_features=256, in_size=32,num_classes=10,n_lin=0,batchn=True):
         super(auxillary_classifier, self).__init__()
@@ -185,7 +182,7 @@ class greedyNet(nn.Module):
         self.in_planes = feature_size
         self.down_sampling = psi(downsampling)
         self.downsample_init = downsampling
-        self.conv1 = nn.Conv2d(3 * downsampling * downsampling, self.in_planes, kernel_size=3, stride=1, padding=1,
+        self.conv1 = nn.Conv2d(3 * downsampling * downsampling, self.in_planes, kernel_size=3, stride=3, padding=2,
                                bias=not batchnorm)
 
         if batchnorm:
