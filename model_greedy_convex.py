@@ -25,7 +25,8 @@ def generate_sign_patterns(P, kernel, k_eff, bias=True, n_channels=3, sparsity=N
 class custom_cvx_layer(torch.nn.Module):
     def __init__(self, in_planes, planes, in_size=32,
                  kernel_size=3, padding=1, avg_size=16, num_classes=10,
-                 bias=False, downsample=False, sparsity=None, feat_aggregate='random'):
+                 bias=False, downsample=False, sparsity=None, feat_aggregate='random',
+                 nonneg_aggregate=False):
         """
         In the constructor we instantiate two nn.Linear modules and assign them as
         member variables.
@@ -44,7 +45,7 @@ class custom_cvx_layer(torch.nn.Module):
 
         self.out_size = (in_size+ 2*padding - kernel_size + 1) # assumes a stride and dilation of 1
         k = int(self.out_size**2)
-        self.k_eff= self.out_size//self.avg_size
+        self.k_eff = self.out_size//self.avg_size
 
         # P x k x h x C
         self.v = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size)/(kernel_size**2*in_planes*planes), requires_grad=True)
@@ -69,22 +70,9 @@ class custom_cvx_layer(torch.nn.Module):
         self.downsample_data = psi3(self.k_eff, self.padding)
         self.downsample_patterns = psi3(self.k_eff)
         self.aggregate_v = torch.nn.Parameter(data=torch.zeros(planes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size), requires_grad=False)
-        self.aggregate_v_bias = torch.nn.Parameter(data=torch.zeros(planes*self.k_eff*self.k_eff), requires_grad=True)
+        self.aggregate_v_bias = torch.nn.Parameter(data=torch.zeros(planes*self.k_eff*self.k_eff), requires_grad=False)
         self.aggregated = False
-        
-        #classifier_weights = nn.Parameter(data=torch.zeros(num_classes, 1, planes*self.k_eff*self.k_eff), requires_grad=False)
-
-        #for i in range(num_classes):
-        #    torch.nn.init.kaiming_uniform_(classifier_weights[i], a=math.sqrt(5))
-
-        ## torch.nn.init.xavier_uniform_(self.v)
-        #torch.nn.init.kaiming_uniform_(self.v, mode='fan_out', nonlinearity='relu')
-        #fan_in, fan_out = torch.nn.init._calculate_fan_in_and_fan_out(self.v)
-        #bound = 1 / math.sqrt(fan_out)
-        #torch.nn.init.uniform_(self.v_bias, -bound, bound)
-
-        #with torch.no_grad():
-        #    self.v.data = self.v.data*classifier_weights.reshape((num_classes*planes*self.k_eff*self.k_eff, 1, 1, 1))
+        self.nonneg_aggregate= nonneg_aggregate
 
     def _forward_helper(self, x):
         # first downsample
@@ -154,9 +142,13 @@ class custom_cvx_layer(torch.nn.Module):
         else:
             Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, groups = self.k_eff*self.k_eff)
 
-        DXv_w = d_downsized * Xv_w
+
+        if self.nonneg_aggregate:
+            DXv_w = torch.nn.ReLU()(Xv_w)
+        else:
+            DXv_w = d_downsized * Xv_w
         next_representation = self.downsample_data.inverse(DXv_w.reshape((DXv_w.shape[0],-1, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4))
-        
+            
         return next_representation
 
 
@@ -180,7 +172,6 @@ class custom_cvx_layer(torch.nn.Module):
                     next_representation = next_representation.reshape((next_representation.shape[0], self.num_classes, self.P, self.out_size, self.out_size))
                     next_representation = torch.max(torch.abs(next_representation), dim=1, keepdim=False)[0]
 
-        # print(torch.max(next_representation), torch.min(next_representation), torch.mean(next_representation))
         return next_representation
 
 class psi(nn.Module):
@@ -247,7 +238,8 @@ class psi3(nn.Module):
 
 class convexGreedyNet(nn.Module):
     def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
-                 in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random'):
+                 in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
+                 nonneg_aggregate=False):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -265,12 +257,14 @@ class convexGreedyNet(nn.Module):
                 in_size = in_size // 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
-                                         downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate))
+                                         downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
+                                         nonneg_aggregate=nonneg_aggregate))
                 # next_in_planes = next_in_planes * 2
             else:
                 self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
-                                         downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate))
+                                         downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
+                                         nonneg_aggregate=nonneg_aggregate))
             
             in_planes = next_in_planes
 

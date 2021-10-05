@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import torch
 import torch.nn as nn
@@ -56,11 +56,13 @@ parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
-parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
+parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
 parser.add_argument('--group_norm', action='store_true', help='Whether to use group norm penalty (otherwise, standard weight decay is used)')
 parser.add_argument('--wd', default=1e-5, type=float, help='regularization parameter')
 parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
+parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
+parser.add_argument('--nonneg_aggregate', action='store_true')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -128,7 +130,8 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, sh
 print('==> Building model..')
 n_cnn=args.ncnn
 net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size,
-                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg)
+                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
+                      nonneg_aggregate=args.nonneg_aggregate)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -335,7 +338,10 @@ for n in range(n_start, n_cnn):
     torch.cuda.empty_cache()
 
     # decay the learning rate at each stage
-    args.lr /= 10
+    if n == n_start:
+        args.lr /= 100
+    elif n < n_cnn-1:
+        args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
@@ -348,6 +354,58 @@ for n in range(n_start, n_cnn):
         else:
             torch.save({
                     'n': n,
+                    'model_state_dict': net.state_dict(),
+                    }, curr_sv_model)
+
+
+if args.e2e_epochs > 0:
+    if args.multi_gpu:
+        net.module.unfreezeAll()
+    else:
+        net.unfreezeAll()
+    to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
+
+    if args.optimizer == 'SGD':
+        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
+    elif args.optimizer == 'Adam':
+        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
+
+    for epoch in range(0, args.e2e_epochs):
+        acc_train = train_classifier(epoch,n_cnn-1)
+        if args.ensemble:
+            acc_test,acc_test_ensemble = test(epoch,n_cnn-1,args.ensemble)
+
+            with open(name_log_txt, "a") as text_file:
+                print("e2e: epoch {}, train {}, test {},ense {} "
+                      .format(epoch,acc_train,acc_test,acc_test_ensemble), file=text_file)
+        else:
+            acc_test = test(epoch, n)
+            with open(name_log_txt, "a") as text_file:
+                print('e2e: epoch {}, train {}, test {}, '.format(epoch,acc_train,acc_test), file=text_file)
+
+        if args.debug:
+            break
+
+        scheduler.step()
+    
+    del to_train
+    del optimizer
+    del scheduler
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    if args.save_checkpoint:
+        curr_sv_model = name_save_model + '_e2e.pt'
+        print('saving checkpoint')
+        if args.multi_gpu:
+            torch.save({
+                    'n': n_cnn-1,
+                    'model_state_dict': net.module.state_dict(),
+                    }, curr_sv_model)
+        else:
+            torch.save({
+                    'n': n_cnn-1,
                     'model_state_dict': net.state_dict(),
                     }, curr_sv_model)
 
