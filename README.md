@@ -9,7 +9,7 @@ python cifar_convex.py
 ```
 
 There are options if you want to save checkpoints after each stage, or load from previous checkpoints. There are options for how different features are aggregated. Also, running the original cifar.py with the --separable tag will allow you to run the 
-non-convex fully separable model which we have convexified. Training the convex program takes about 15 hours on one GPU. 
+non-convex fully separable model which we have convexified. Training the convex program takes about 8.5 hours on one GPU. 
 
 
 
