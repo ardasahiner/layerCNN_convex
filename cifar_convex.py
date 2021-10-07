@@ -37,7 +37,7 @@ parser.add_argument('--feature_size',  default=256,type=int, help='feature size'
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
-parser.add_argument('--batch_size', default=100,type=int,help='batch size')
+parser.add_argument('--batch_size', default=50,type=int,help='batch size')
 parser.add_argument('--bn', default=0,type=int,help='use batchnorm')
 parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
@@ -140,7 +140,7 @@ with open(name_log_txt, "a") as text_file:
 if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
-# cudnn.benchmark = True
+cudnn.benchmark = True
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
@@ -218,7 +218,6 @@ def train_classifier(epoch,n):
 
         progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
             % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
-
 
     acc = 100.*float(correct)/float(total)
     return acc
@@ -338,8 +337,8 @@ for n in range(n_start, n_cnn):
     torch.cuda.empty_cache()
 
     # decay the learning rate at each stage
-    if n == n_start:
-        args.lr /= 100
+    if n < 2:
+        args.lr /= 50
     elif n < n_cnn-1:
         args.lr /= 10
 

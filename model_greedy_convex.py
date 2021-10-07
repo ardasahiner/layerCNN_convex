@@ -16,11 +16,11 @@ def generate_sign_patterns(P, kernel, k_eff, bias=True, n_channels=3, sparsity=N
         mask = np.random.choice([1, 0], size=(P, n_channels, kernel, kernel), p=[sparsity, 1-sparsity])
         umat = idct(idct(umat * mask, axis=2), axis=3)
     
-    #umat = umat.transpose(1, 2, 3, 0).reshape((h, P))
     umat = torch.from_numpy(umat).float()
-    biasmat = np.random.normal(0, torch.std(umat), (P))
+    umat /= kernel**2
+    biasmat = torch.from_numpy(np.random.normal(0, torch.mean(torch.std(umat, (2, 3))), (P))).float()
     
-    return umat, torch.from_numpy(biasmat).float()
+    return umat, biasmat
 
 class custom_cvx_layer(torch.nn.Module):
     def __init__(self, in_planes, planes, in_size=32,
@@ -172,6 +172,9 @@ class custom_cvx_layer(torch.nn.Module):
                     next_representation = next_representation.reshape((next_representation.shape[0], self.num_classes, self.P, self.out_size, self.out_size))
                     next_representation = torch.max(torch.abs(next_representation), dim=1, keepdim=False)[0]
 
+
+        if torch.any(torch.isnan(next_representation)):
+            print('aggregated features yield nan!')
         return next_representation
 
 class psi(nn.Module):
@@ -255,17 +258,21 @@ class convexGreedyNet(nn.Module):
                 pre_factor = 4
                 avg_size = avg_size // 2
                 in_size = in_size // 2
+                if n > 2:
+                    next_in_planes = next_in_planes * 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate))
-                # next_in_planes = next_in_planes * 2
             else:
+                pre_factor = 1
                 self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=3,
                                          padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate))
-            
+    
+            print(n)
+            print(pre_factor*in_planes, next_in_planes)
             in_planes = next_in_planes
 
         self.blocks = nn.ModuleList(self.blocks)
