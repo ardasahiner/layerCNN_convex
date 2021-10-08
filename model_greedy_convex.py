@@ -34,6 +34,9 @@ class custom_cvx_layer(torch.nn.Module):
         super(custom_cvx_layer, self).__init__()
 
         self.feat_aggregate = feat_aggregate
+        if feat_aggregate == 'random':
+            self.feat_indices = np.random.choice(np.arange(self.P*num_classes), size=[self.P])
+
         h = int(kernel_size**2) * in_planes
         self.avg_size = avg_size
         self.P = planes
@@ -62,11 +65,8 @@ class custom_cvx_layer(torch.nn.Module):
         self.bias_vectors = torch.nn.Parameter(data=self.bias_vectors, requires_grad=False)
         self.kernel_size = kernel_size
         self.padding = padding
-        self.unf = nn.Unfold(kernel_size=kernel_size, padding=padding)
         self.in_size = in_size
         self.in_planes = in_planes
-        self.feat_indices = np.random.choice(np.arange(self.P*num_classes), size=[self.P])
-        
         self.downsample_data = psi3(self.k_eff, self.padding)
         self.downsample_patterns = psi3(self.k_eff)
         self.aggregate_v = torch.nn.Parameter(data=torch.zeros(planes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size), requires_grad=False)
@@ -115,11 +115,12 @@ class custom_cvx_layer(torch.nn.Module):
             self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
         elif self.feat_aggregate == 'weight_rankone':
             aggregate_v = self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)).permute(0, 2, 1, 3, 4, 5)
-            aggregate_v = self.v.reshape((self.P*self.k_eff*self.k_eff, self.num_classes, -1)).permute(0, 2, 1) # P*k^2 x spatial dims x c
+            aggregate_v = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, self.num_classes, -1)).permute(0, 2, 1) # P*k^2 x spatial dims x c
             u, s, v = torch.svd(aggregate_v)
-            aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
+            #aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
+            aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1))
             self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
-            aggregate_v_bias = torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0]
+            aggregate_v_bias = torch.sqrt(torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0])
             self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
 
         self.aggregated = True
@@ -141,7 +142,6 @@ class custom_cvx_layer(torch.nn.Module):
             Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, bias=self.aggregate_v_bias, groups = self.k_eff*self.k_eff)
         else:
             Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, groups = self.k_eff*self.k_eff)
-
 
         if self.nonneg_aggregate:
             DXv_w = torch.nn.ReLU()(Xv_w)
@@ -242,13 +242,16 @@ class psi3(nn.Module):
 class convexGreedyNet(nn.Module):
     def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
-                 nonneg_aggregate=False):
+                 nonneg_aggregate=False, kernel_size=3):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
         self.blocks = []
         self.block = block
         self.batchn = batchnorm
+
+        self.kernel_size = kernel_size
+        self.padding = kernel_size//2
         
         in_planes = 3
         next_in_planes = self.in_planes
@@ -260,14 +263,14 @@ class convexGreedyNet(nn.Module):
                 in_size = in_size // 2
                 if n > 2:
                     next_in_planes = next_in_planes * 2
-                self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=3,
-                                         padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
+                self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
+                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate))
             else:
                 pre_factor = 1
-                self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=3,
-                                         padding=1, avg_size=avg_size, num_classes=num_classes, bias=True, 
+                self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=self.kernel_size,
+                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate))
     

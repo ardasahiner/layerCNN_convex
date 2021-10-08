@@ -27,7 +27,7 @@ import datetime
 import json
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=2e-3, type=float, help='learning rate')
+parser.add_argument('--lr', default=2e-4, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -59,10 +59,11 @@ parser.add_argument('--save_checkpoint', action='store_true', help='Whether to s
 parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
 parser.add_argument('--group_norm', action='store_true', help='Whether to use group norm penalty (otherwise, standard weight decay is used)')
-parser.add_argument('--wd', default=1e-5, type=float, help='regularization parameter')
+parser.add_argument('--wd', default=5e-4, type=float, help='regularization parameter')
 parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
 parser.add_argument('--nonneg_aggregate', action='store_true')
+parser.add_argument('--kernel_size', default=3, type=int, help='kernel size of convolutions')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -72,6 +73,7 @@ if args.sparsity == 0:
     args.sparsity = None
 
 assert args.bn == False, 'batch norm not yet implemented'
+assert args.kernel_size %2 == 1, 'kernel size must be odd'
 args.debug_parameters = args.debug_parameters > 0
 args.multi_gpu = args.multi_gpu > 0
 
@@ -131,11 +133,10 @@ print('==> Building model..')
 n_cnn=args.ncnn
 net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size,
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                      nonneg_aggregate=args.nonneg_aggregate)
+                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
-
 
 if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
@@ -337,10 +338,12 @@ for n in range(n_start, n_cnn):
     torch.cuda.empty_cache()
 
     # decay the learning rate at each stage
-    if n < 2:
-        args.lr /= 50
-    elif n < n_cnn-1:
+    if n < 1:
+        args.lr /= 100
+    elif n == 2:
         args.lr /= 10
+    #elif n < n_cnn-1:
+    #    args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
@@ -368,7 +371,7 @@ if args.e2e_epochs > 0:
         optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
     elif args.optimizer == 'Adam':
         optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, 2*args.epochdecay], 0.2, verbose=True)
 
     for epoch in range(0, args.e2e_epochs):
         acc_train = train_classifier(epoch,n_cnn-1)
