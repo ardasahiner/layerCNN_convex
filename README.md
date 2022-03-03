@@ -8,9 +8,9 @@ The current state can be run simply by
 python cifar_convex.py
 ```
 
-There are options if you want to save checkpoints after each stage, or load from previous checkpoints. There are options for how different features are aggregated. Also, running the original cifar.py with the --separable tag will allow you to run the 
-non-convex fully separable model which we have convexified. Training the convex program takes about 8.5 hours on one GPU. 
+There are options if you want to save checkpoints after each stage, or load from previous checkpoints. There are options for how different features are aggregated. Also, running the original cifar.py with the --separable tag will allow you to run the non-convex fully separable model which we have convexified. Training the convex program takes about 8.5 hours on one GPU. 
 
+If you would like to use the FFCV data loader, you can use the --ffcv flag to indicate this. Just make sure you have the appropriate .beton files in the correct repositories. One may also use burer-monteiro factorization with the appropriate hidden dimension if desired. 
 
 
 The current results of the defaults in the codebase are given as follows:

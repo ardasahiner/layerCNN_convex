@@ -198,12 +198,15 @@ class greedyNet(nn.Module):
         self.blocks.append(nn.Sequential(self.conv1, self.bn1, self.RELU))  # n=0
         self.batchn = batchnorm
         for n in range(num_blocks - 1):
+            print(n)
+            print(self.in_planes)
             if n in downsample:
                 pre_factor = 4
                 self.blocks.append(block(self.in_planes * pre_factor, self.in_planes * 2,downsample=True, batchn=batchnorm))
                 self.in_planes = self.in_planes * 2
             else:
                 self.blocks.append(block(self.in_planes, self.in_planes,batchn=batchnorm))
+            print(self.in_planes)
 
         self.blocks = nn.ModuleList(self.blocks)
         for n in range(num_blocks):
@@ -242,3 +245,5 @@ class greedyNet(nn.Module):
             out = self.blocks[n](out)
         return out
 
+if __name__ == '__main__':
+    _ = greedyNet(block_conv, 5, feature_size=256, downsampling=1, downsample=[2, 3], batchnorm=True)

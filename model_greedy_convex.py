@@ -26,20 +26,20 @@ class custom_cvx_layer(torch.nn.Module):
     def __init__(self, in_planes, planes, in_size=32,
                  kernel_size=3, padding=1, avg_size=16, num_classes=10,
                  bias=False, downsample=False, sparsity=None, feat_aggregate='random',
-                 nonneg_aggregate=False):
+                 nonneg_aggregate=False, burer_monteiro=False, burer_dim=10):
         """
         In the constructor we instantiate two nn.Linear modules and assign them as
         member variables.
         """
         super(custom_cvx_layer, self).__init__()
 
+        self.P = planes
         self.feat_aggregate = feat_aggregate
         if feat_aggregate == 'random':
             self.feat_indices = np.random.choice(np.arange(self.P*num_classes), size=[self.P])
 
         h = int(kernel_size**2) * in_planes
         self.avg_size = avg_size
-        self.P = planes
         self.h = h
         self.num_classes = num_classes
         self.downsample = downsample
@@ -49,11 +49,22 @@ class custom_cvx_layer(torch.nn.Module):
         self.out_size = (in_size+ 2*padding - kernel_size + 1) # assumes a stride and dilation of 1
         k = int(self.out_size**2)
         self.k_eff = self.out_size//self.avg_size
+        self.burer_monteiro = burer_monteiro
 
-        # P x k x h x C
-        self.v = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size)/(kernel_size**2*in_planes*planes), requires_grad=True)
-        if bias:
-            self.v_bias = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff), requires_grad=True)
+        if self.burer_monteiro:
+            self.v = torch.nn.Parameter(data=torch.randn(planes*burer_dim*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size)/(in_planes*kernel_size*kernel_size), requires_grad=True)
+            if bias:
+                self.v_bias = torch.nn.Parameter(data=torch.zeros(planes*burer_dim*self.k_eff*self.k_eff), requires_grad=True)
+            
+            self.w = torch.nn.Parameter(data=torch.randn(planes*num_classes*self.k_eff*self.k_eff, planes*burer_dim,1, 1)/(planes*burer_dim), requires_grad=True)
+            if bias:
+                self.w_bias = torch.nn.Parameter(data=torch.zeros(num_classes*planes*self.k_eff*self.k_eff), requires_grad=True)
+
+        else:
+            # P x k x h x C
+            self.v = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff, in_planes, kernel_size, kernel_size)/(kernel_size**2*in_planes*planes), requires_grad=True)
+            if bias:
+                self.v_bias = torch.nn.Parameter(data=torch.zeros(planes*num_classes*self.k_eff*self.k_eff), requires_grad=True)
 
         self.bias = bias
 
@@ -91,6 +102,12 @@ class custom_cvx_layer(torch.nn.Module):
             Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, bias=self.v_bias, groups = self.k_eff*self.k_eff)
         else:
             Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, groups = self.k_eff*self.k_eff)
+        
+        if self.burer_monteiro:
+            if self.bias:
+                Xv_w = torch.nn.functional.conv2d(Xv_w, self.w, bias=self.w_bias, groups=self.k_eff*self.k_eff)
+            else:
+                Xv_w = torch.nn.functional.conv2d(Xv_w, self.w, groups = self.k_eff*self.k_eff)
 
         Xv_w = Xv_w.reshape((Xv_w.shape[0], self.k_eff*self.k_eff, self.num_classes, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
         Xv_w = Xv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
@@ -104,26 +121,27 @@ class custom_cvx_layer(torch.nn.Module):
         return y_pred
     
     def _aggregate_weights(self):
-        v_norms = torch.sqrt(torch.sum(self.v**2, dim=(1, 2, 3), keepdim=True)) # P*c*k_eff*k_eff x 1 x 1 x 1
-        self.v /= (torch.sqrt(v_norms) + 1e-8)
-        self.v_bias /= (torch.sqrt(torch.squeeze(v_norms)) + 1e-8)
+        if not self.burer_monteiro:
+            v_norms = torch.sqrt(torch.sum(self.v**2, dim=(1, 2, 3), keepdim=True)) # P*c*k_eff*k_eff x 1 x 1 x 1
+            self.v /= (torch.sqrt(v_norms) + 1e-8)
+            self.v_bias /= (torch.sqrt(torch.squeeze(v_norms)) + 1e-8)
 
-        if self.feat_aggregate == 'weight_max':
-            aggregate_v = torch.max(self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)), dim=1, keepdim=False)[0]
-            self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
-            aggregate_v_bias = torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0]
-            self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
-        elif self.feat_aggregate == 'weight_rankone':
-            aggregate_v = self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)).permute(0, 2, 1, 3, 4, 5)
-            aggregate_v = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, self.num_classes, -1)).permute(0, 2, 1) # P*k^2 x spatial dims x c
-            u, s, v = torch.svd(aggregate_v)
-            #aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
-            aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1))
-            self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
-            aggregate_v_bias = torch.sqrt(torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0])
-            self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
+            if self.feat_aggregate == 'weight_max':
+                aggregate_v = torch.max(self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)), dim=1, keepdim=False)[0]
+                self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
+                aggregate_v_bias = torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0]
+                self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
+            elif self.feat_aggregate == 'weight_rankone':
+                aggregate_v = self.v.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1, self.kernel_size, self.kernel_size)).permute(0, 2, 1, 3, 4, 5)
+                aggregate_v = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, self.num_classes, -1)).permute(0, 2, 1) # P*k^2 x spatial dims x c
+                u, s, v = torch.svd(aggregate_v)
+                #aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
+                aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1))
+                self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
+                aggregate_v_bias = torch.sqrt(torch.max(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)[0])
+                self.aggregate_v_bias.data = aggregate_v_bias.reshape((self.P*self.k_eff*self.k_eff))
 
-        self.aggregated = True
+            self.aggregated = True
 
     def _forward_aggregated(self, x):
         # first downsample
@@ -158,20 +176,43 @@ class custom_cvx_layer(torch.nn.Module):
             if not self.aggregated:
                 self._aggregate_weights()
 
-            if self.feat_aggregate.startswith('weight'):
-                next_representation = self._forward_aggregated(x)
+            if not self.burer_monteiro:
+                if self.feat_aggregate.startswith('weight'):
+                    next_representation = self._forward_aggregated(x)
+                else:
+                    DXv_w = self._forward_helper(x)
+                    next_representation = DXv_w.reshape((DXv_w.shape[0], self.num_classes, self.k_eff*self.k_eff, -1, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5).reshape((DXv_w.shape[0], -1, self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+                    next_representation = self.downsample_data.inverse(next_representation)
+
+                    if self.feat_aggregate == 'random':
+                        next_representation = next_representation[:, self.feat_indices, :, :]
+
+                    if self.feat_aggregate == 'max':
+                        next_representation = next_representation.reshape((next_representation.shape[0], self.num_classes, self.P, self.out_size, self.out_size))
+                        next_representation = torch.max(torch.abs(next_representation), dim=1, keepdim=False)[0]
             else:
-                DXv_w = self._forward_helper(x)
-                next_representation = DXv_w.reshape((DXv_w.shape[0], self.num_classes, self.k_eff*self.k_eff, -1, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5).reshape((DXv_w.shape[0], -1, self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+                if self.downsample:
+                    x = self.down(x)
+                    
+                x_downsized = self.downsample_data(x) # n x in_planes*k_eff*k_eff x avg_size x avg_size
+
+                with torch.no_grad():
+                    sign_patterns = (F.conv2d(x, self.u_vectors, bias=self.bias_vectors, padding=self.padding) >= 0).float() # n x P x out_size * out_size
+
+                d_downsized = self.downsample_patterns(sign_patterns) # n x P*k_eff*k_eff x avg_size x avg_size
+
+                # n x P*c*k_eff*k_eff x avg_size x avg_size
+                if self.bias:
+                    Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, bias=self.v_bias, groups = self.k_eff*self.k_eff)
+                else:
+                    Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, groups = self.k_eff*self.k_eff)
+
+                Xv_w = Xv_w.reshape((Xv_w.shape[0], self.k_eff*self.k_eff, -1, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
+                Xv_w = Xv_w.reshape((Xv_w.shape[0], -1, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+                DXv_w = d_downsized.unsqueeze(1) * Xv_w
+
+                next_representation = DXv_w.reshape((Xv_w.shape[0], -1, self.k_eff*self.k_eff, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5).reshape((DXv_w.shape[0], -1, self.k_eff*self.k_eff, self.avg_size, self.avg_size))
                 next_representation = self.downsample_data.inverse(next_representation)
-
-                if self.feat_aggregate == 'random':
-                    next_representation = next_representation[:, self.feat_indices, :, :]
-
-                if self.feat_aggregate == 'max':
-                    next_representation = next_representation.reshape((next_representation.shape[0], self.num_classes, self.P, self.out_size, self.out_size))
-                    next_representation = torch.max(torch.abs(next_representation), dim=1, keepdim=False)[0]
-
 
         if torch.any(torch.isnan(next_representation)):
             print('aggregated features yield nan!')
@@ -242,7 +283,7 @@ class psi3(nn.Module):
 class convexGreedyNet(nn.Module):
     def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
-                 nonneg_aggregate=False, kernel_size=3):
+                 nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -261,18 +302,20 @@ class convexGreedyNet(nn.Module):
                 pre_factor = 4
                 avg_size = avg_size // 2
                 in_size = in_size // 2
-                if n > 2:
+                if n > 2 or (burer_monteiro and burer_dim < 4):
                     next_in_planes = next_in_planes * 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
-                                         nonneg_aggregate=nonneg_aggregate))
+                                         nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
+                                         burer_dim=burer_dim))
             else:
                 pre_factor = 1
                 self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
-                                         nonneg_aggregate=nonneg_aggregate))
+                                         nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
+                                         burer_dim=burer_dim))
     
             print(n)
             print(pre_factor*in_planes, next_in_planes)
@@ -310,3 +353,5 @@ class convexGreedyNet(nn.Module):
                 out = self.blocks[n](out)
         return out
 
+if __name__ == '__main__':
+    _ = convexGreedyNet(custom_cvx_layer, 5, feature_size=256, downsample=[2, 3])

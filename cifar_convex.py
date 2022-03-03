@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,7 @@ import gc
 
 import torchvision
 import torchvision.transforms as transforms
+from torch.cuda.amp import GradScaler, autocast
 
 import os
 import argparse
@@ -26,8 +27,19 @@ from random import randint
 import datetime
 import json
 
+from typing import List
+
+from ffcv.fields import IntField, RGBImageField
+from ffcv.fields.decoders import IntDecoder, SimpleRGBImageDecoder
+from ffcv.loader import Loader, OrderOption
+from ffcv.pipeline.operation import Operation
+from ffcv.transforms import RandomHorizontalFlip, Cutout, \
+    RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
+from ffcv.transforms.common import Squeeze
+from ffcv.writer import DatasetWriter
+
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=2e-4, type=float, help='learning rate')
+parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -51,7 +63,7 @@ parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
-parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
+parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
@@ -64,6 +76,9 @@ parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss 
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
 parser.add_argument('--nonneg_aggregate', action='store_true')
 parser.add_argument('--kernel_size', default=3, type=int, help='kernel size of convolutions')
+parser.add_argument('--burer_monteiro', action='store_true', help='Whether to use burer-monteiro factorization')
+parser.add_argument('--burer_dim', default =10, type=int, help='dimension of burer monteiro')
+parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -88,6 +103,7 @@ if args.seed is not None:
     seed = int(args.seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
 save_name = 'convex_layersize_'+str(args.feature_size) +'down_' +  args.down 
 #logging
@@ -108,24 +124,67 @@ with open(name_log_txt, "a") as text_file:
 use_cuda = torch.cuda.is_available()
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
-# Data
-print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
 
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+if args.ffcv:
 
-trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
-trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
-testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    print('using ffcv')
+    CIFAR_MEAN = [125.307, 122.961, 113.8575]
+    CIFAR_STD = [51.5865, 50.847, 51.255]
+
+
+    paths = {
+            'train': os.path.join(args.data_dir, 'cifar_train.beton'),
+            'test': os.path.join(args.data_dir, 'cifar_test.beton')
+        }
+
+    loaders = {}
+
+    for name in ['train', 'test']:
+        label_pipeline: List[Operation] = [IntDecoder(), ToTensor(), ToDevice('cuda:0'), Squeeze()]
+        image_pipeline: List[Operation] = [SimpleRGBImageDecoder()]
+        if name == 'train':
+            image_pipeline.extend([
+                RandomHorizontalFlip(),
+                RandomTranslate(padding=2, fill=tuple(map(int, CIFAR_MEAN))),
+                Cutout(4, tuple(map(int, CIFAR_MEAN))),
+            ])
+        image_pipeline.extend([
+            ToTensor(),
+            ToDevice('cuda:0', non_blocking=True),
+            ToTorchImage(),
+            Convert(torch.float16),
+            torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+        ])
+
+        ordering = OrderOption.RANDOM if name == 'train' else OrderOption.SEQUENTIAL
+
+        loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
+                               order=ordering, drop_last=(name == 'train'),
+                               pipelines={'image': image_pipeline, 'label': label_pipeline})
+
+    trainloader_classifier = loaders['train']
+    testloader = loaders['test']
+
+else:
+    print('not using ffcv')
+    # Data
+    print('==> Preparing data..')
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
+    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 # Model
 
@@ -133,7 +192,8 @@ print('==> Building model..')
 n_cnn=args.ncnn
 net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size,
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size)
+                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
+                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -187,18 +247,26 @@ def train_classifier(epoch,n):
             targets_loss = targets
 
         optimizer.zero_grad()
-        outputs = net.forward([inputs,n])
 
-        loss = criterion_classifier(outputs, targets_loss)
+        with autocast():
+            outputs = net.forward([inputs,n])
 
-        if args.group_norm:
-            if args.multi_gpu:
-                loss += args.wd*torch.sum(torch.norm(net.module.blocks[n].v.reshape((net.module.blocks[n].v.shape[0], -1)), dim=1))
-            else:
-                loss += args.wd*torch.sum(torch.norm(net.blocks[n].v.reshape((net.blocks[n].v.shape[0], -1)), dim=1))
+            loss = criterion_classifier(outputs, targets_loss)
 
-        loss.backward()
-        optimizer.step()
+            if args.group_norm:
+                if args.multi_gpu:
+                    loss += args.wd*torch.sum(torch.norm(net.module.blocks[n].v.reshape((net.module.blocks[n].v.shape[0], -1)), dim=1))
+                else:
+                    loss += args.wd*torch.sum(torch.norm(net.blocks[n].v.reshape((net.blocks[n].v.shape[0], -1)), dim=1))
+
+            train_loss += loss.item()
+            _, predicted = torch.max(outputs.detach().data, 1)
+            total += targets.size(0)
+            correct += predicted.eq(targets.data).cpu().sum().item()
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         loss_pers=0
 
         if args.debug_parameters:
@@ -212,10 +280,6 @@ def train_classifier(epoch,n):
                     diff = np.sum((s_dict[param].cpu().numpy()-net_cpu_dict[param])**2)
                     print("n: %d parameter: %s size: %s changed by %.5f" % (n,param,net_cpu_dict[param].shape,diff),file=text_file)
 
-        train_loss += loss.item()
-        _, predicted = torch.max(outputs.detach().data, 1)
-        total += targets.size(0)
-        correct += predicted.eq(targets.data).cpu().sum().item()
 
         progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
             % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
@@ -254,14 +318,15 @@ def test(epoch,n,ensemble=False):
             else:
                 targets_loss = targets
 
-            outputs = net([inputs,n])
+            with autocast():
+                outputs = net([inputs,n])
 
-            loss = criterion_classifier(outputs, targets_loss)
+                loss = criterion_classifier(outputs, targets_loss)
 
-            test_loss += loss.item()
-            _, predicted = torch.max(outputs.detach().data, 1)
-            total += targets.size(0)
-            correct += predicted.eq(targets.data).cpu().sum().item()
+                test_loss += loss.item()
+                _, predicted = torch.max(outputs.detach().data, 1)
+                total += targets.size(0)
+                correct += predicted.eq(targets.data).cpu().sum().item()
 
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                 % (test_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total))
@@ -312,6 +377,7 @@ for n in range(n_start, n_cnn):
     elif args.optimizer == 'Adam':
         optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
+    scaler = GradScaler()
 
     for epoch in range(0, num_ep):
         acc_train = train_classifier(epoch,n)
