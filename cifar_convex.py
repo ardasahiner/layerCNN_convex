@@ -136,7 +136,7 @@ if args.ffcv:
         RandomResizedCropRGBImageDecoder
     from ffcv.loader import Loader, OrderOption
     from ffcv.pipeline.operation import Operation
-    from ffcv.transforms import RandomHorizontalFlip, Cutout, \
+    from ffcv.transforms import RandomHorizontalFlip, Cutout, NormalizeImage, \
         RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
     from ffcv.transforms.common import Squeeze
     from ffcv.writer import DatasetWriter
