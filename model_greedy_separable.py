@@ -9,22 +9,31 @@ from functools import partial
 
 class separable_block_conv(nn.Module):
     expansion = 1
-    def __init__(self, in_planes, planes,downsample=False,batchn=True, num_classes=10, in_size=32, avg_size=16):
+    def __init__(self, in_planes, planes,downsample=False,batchn=True, num_classes=10, in_size=32, avg_size=16, spatial=False, cls=False):
         super(separable_block_conv, self).__init__()
         self.downsample = downsample
         if downsample:
             self.down = psi(2)
 
-        self.k_eff = (in_size//avg_size)*(in_size//avg_size)
-        self.conv1 = nn.Conv2d(in_planes*self.k_eff, planes*num_classes*self.k_eff, kernel_size=3, stride=1, padding=0, bias=False, groups=self.k_eff)
+        if not cls:
+            num_classes = 1
+
+        if spatial:
+            self.k_eff = (in_size//avg_size)*(in_size//avg_size)
+            self.conv1 = nn.Conv2d(in_planes*self.k_eff, planes*num_classes*self.k_eff, kernel_size=3, stride=1, padding=0, bias=False, groups=self.k_eff)
+            self.sep = psi3(in_size//avg_size, padding=1)
+        else:
+            self.conv1 = nn.Conv2d(in_planes, planes*num_classes, kernel_size=3, stride=1, padding=1, bias=False)
+            self.sep = identity()
+
         if batchn:
             self.bn1 = nn.BatchNorm2d(planes*num_classes)
         else:
             self.bn1 = identity()  # Identity
 
         self.feature_extract = False
-        self.sep = psi3(in_size//avg_size, padding=1)
         self.planes=planes
+        self.spatial = spatial
 
     def forward(self, x):
         if self.downsample:
@@ -35,14 +44,14 @@ class separable_block_conv(nn.Module):
         out = F.relu(self.bn1(self.conv1(x))) # n x P*c*k_eff x avg_size x avg_size
 
         if self.feature_extract:
-            out = out.reshape((x.shape[0], self.k_eff, -1, out.shape[-2], out.shape[-1]))
-            out = self.sep.inverse(out)
+
+            if self.spatial:
+                out = out.reshape((x.shape[0], self.k_eff, -1, out.shape[-2], out.shape[-1]))
+                out = self.sep.inverse(out)
             out = out.reshape((x.shape[0], self.planes, -1, out.shape[-2], out.shape[-1]))
             out = torch.max(out, dim=2, keepdim=False)[0]
-            print(torch.max(out), torch.min(out), torch.mean(out))
 
         return out
-
 
 class psi(nn.Module):
     def __init__(self, block_size):
@@ -125,7 +134,7 @@ class psi3(nn.Module):
         return input.contiguous()
 
 class separable_auxillary_classifier(nn.Module):
-    def __init__(self,avg_size=16,feature_size=256,input_features=256, in_size=32,num_classes=10,n_lin=0,batchn=True):
+    def __init__(self,avg_size=16,feature_size=256,input_features=256, in_size=32,num_classes=10,n_lin=0,batchn=True, spatial=False, cls=False):
         super(separable_auxillary_classifier, self).__init__()
         self.n_lin=n_lin
 
@@ -141,6 +150,7 @@ class separable_auxillary_classifier(nn.Module):
         self.classifier_biases = nn.Parameter(data=torch.zeros(num_classes, 1, 1), requires_grad=True)
         self.feature_size = feature_size
         self.num_classes = num_classes
+        self.cls = cls
 
         for i in range(num_classes):
             torch.nn.init.kaiming_uniform_(self.classifier_weights[i], a=math.sqrt(5))
@@ -154,9 +164,13 @@ class separable_auxillary_classifier(nn.Module):
         out = out.view(out.size(0), -1)
 
         # c x n x d
-        out = out.reshape((out.shape[0], self.feature_size, self.num_classes, -1)).permute(2, 0, 1, 3).reshape((self.num_classes, out.shape[0], -1))
-        out = out @ self.classifier_weights.permute(0, 2, 1) + self.classifier_biases # c x n x 1
-        return out.squeeze().t()
+        if self.cls:
+            out = out.reshape((out.shape[0], self.feature_size, self.num_classes, -1)).permute(2, 0, 1, 3).reshape((self.num_classes, out.shape[0], -1))
+            out = out @ self.classifier_weights.permute(0, 2, 1) + self.classifier_biases # c x n x 1
+            return out.squeeze().t()
+        else:
+            out = out @ self.classifier_weights.squeeze().t() + self.classifier_biases.squeeze() # n x c
+            return out
 
 
 class identity(nn.Module):
@@ -167,23 +181,25 @@ class identity(nn.Module):
         return input
 
 class separableGreedyNet(nn.Module):
-    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True, num_classes=10):
+    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True, num_classes=10, spatial=False, cls=False):
         super(separableGreedyNet, self).__init__()
         self.in_planes = feature_size
         self.down_sampling = psi(downsampling)
         self.downsample_init = downsampling
         self.blocks = []
         self.block = block
-        self.blocks.append(block(3*downsampling*downsampling, self.in_planes, downsample=False, batchn=batchnorm))  # n=0
+        self.blocks.append(block(3*downsampling*downsampling, self.in_planes, downsample=False, batchn=batchnorm, spatial=spatial, cls=cls))  # n=0
         self.batchn = batchnorm
+        self.spatial = spatial
+        self.cls = cls
         self.feature_extract = False
         for n in range(num_blocks - 1):
             if n in downsample:
                 pre_factor = 4
-                self.blocks.append(block(self.in_planes * pre_factor, self.in_planes * 2,downsample=True, batchn=batchnorm))
+                self.blocks.append(block(self.in_planes * pre_factor, self.in_planes * 2,downsample=True, batchn=batchnorm, spatial=spatial, cls=cls))
                 self.in_planes = self.in_planes * 2
             else:
-                self.blocks.append(block(self.in_planes, self.in_planes,batchn=batchnorm))
+                self.blocks.append(block(self.in_planes, self.in_planes,batchn=batchnorm, spatial=spatial, cls=cls))
 
         self.blocks = nn.ModuleList(self.blocks)
         for n in range(num_blocks):
@@ -210,11 +226,16 @@ class separableGreedyNet(nn.Module):
     def add_block(self, in_size, avg_size, downsample=False):
         if downsample:
             pre_factor = 4 # the old block needs this factor 4
-            self.blocks.append(
-                self.block(self.in_planes * pre_factor, self.in_planes, downsample=True, batchn=self.batchn, in_size=in_size, avg_size=avg_size))
-            self.in_planes = self.in_planes
+            if self.cls:
+                self.blocks.append(
+                    self.block(self.in_planes * pre_factor, self.in_planes, downsample=True, batchn=self.batchn, in_size=in_size, avg_size=avg_size, spatial=self.spatial, cls=self.cls))
+                self.in_planes = self.in_planes
+            else:
+                self.blocks.append(
+                    self.block(self.in_planes * pre_factor, self.in_planes * 2, downsample=True, batchn=self.batchn))
+                self.in_planes = self.in_planes * 2
         else:
-            self.blocks.append(self.block(self.in_planes, self.in_planes,batchn=self.batchn, in_size=in_size, avg_size=avg_size))
+            self.blocks.append(self.block(self.in_planes, self.in_planes,batchn=self.batchn, in_size=in_size, avg_size=avg_size, spatial=self.spatial, cls=self.cls))
 
     def forward(self, a):
         x = a[0]

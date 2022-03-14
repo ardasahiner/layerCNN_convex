@@ -29,14 +29,6 @@ import json
 
 from typing import List
 
-from ffcv.fields import IntField, RGBImageField
-from ffcv.fields.decoders import IntDecoder, SimpleRGBImageDecoder
-from ffcv.loader import Loader, OrderOption
-from ffcv.pipeline.operation import Operation
-from ffcv.transforms import RandomHorizontalFlip, Cutout, \
-    RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
-from ffcv.transforms.common import Squeeze
-from ffcv.writer import DatasetWriter
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
@@ -70,15 +62,20 @@ parser.add_argument('--deterministic', '-det', action='store_true', help='Determ
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
 parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
+
 parser.add_argument('--group_norm', action='store_true', help='Whether to use group norm penalty (otherwise, standard weight decay is used)')
 parser.add_argument('--wd', default=5e-4, type=float, help='regularization parameter')
 parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
 parser.add_argument('--nonneg_aggregate', action='store_true')
 parser.add_argument('--kernel_size', default=3, type=int, help='kernel size of convolutions')
+
 parser.add_argument('--burer_monteiro', action='store_true', help='Whether to use burer-monteiro factorization')
-parser.add_argument('--burer_dim', default =10, type=int, help='dimension of burer monteiro')
+parser.add_argument('--burer_dim', default =1, type=int, help='dimension of burer monteiro')
+
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
+parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'],
+                    type=str, help='Dataset path')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -105,7 +102,7 @@ if args.seed is not None:
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
 
-save_name = 'convex_layersize_'+str(args.feature_size) +'down_' +  args.down 
+save_name = 'convex_layersize_'+str(args.feature_size) +'down_' +  args.down + args.data_set
 #logging
 time_stamp = str(datetime.datetime.now().isoformat())
 
@@ -125,48 +122,120 @@ use_cuda = torch.cuda.is_available()
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 
+if args.data_set == 'CIFAR10':
+    num_classes = 10
+elif args.data_set == 'IMNET':
+    num_classes = 1000
+else:
+    assert False, "dataset name not in CIFAR10, IMNET"
+
 if args.ffcv:
+    from ffcv.fields import IntField, RGBImageField
+    from ffcv.fields.decoders import IntDecoder, SimpleRGBImageDecoder
+    from ffcv.fields.rgb_image import CenterCropRGBImageDecoder, \
+        RandomResizedCropRGBImageDecoder
+    from ffcv.loader import Loader, OrderOption
+    from ffcv.pipeline.operation import Operation
+    from ffcv.transforms import RandomHorizontalFlip, Cutout, \
+        RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
+    from ffcv.transforms.common import Squeeze
+    from ffcv.writer import DatasetWriter
 
     print('using ffcv')
-    CIFAR_MEAN = [125.307, 122.961, 113.8575]
-    CIFAR_STD = [51.5865, 50.847, 51.255]
+
+    if args.data_set == 'CIFAR10':
+        CIFAR_MEAN = [125.307, 122.961, 113.8575]
+        CIFAR_STD = [51.5865, 50.847, 51.255]
 
 
-    paths = {
-            'train': os.path.join(args.data_dir, 'cifar_train.beton'),
-            'test': os.path.join(args.data_dir, 'cifar_test.beton')
-        }
+        paths = {
+                'train': os.path.join(args.data_dir, 'cifar_train.beton'),
+                'test': os.path.join(args.data_dir, 'cifar_test.beton')
+            }
 
-    loaders = {}
+        loaders = {}
 
-    for name in ['train', 'test']:
-        label_pipeline: List[Operation] = [IntDecoder(), ToTensor(), ToDevice('cuda:0'), Squeeze()]
-        image_pipeline: List[Operation] = [SimpleRGBImageDecoder()]
-        if name == 'train':
+        for name in ['train', 'test']:
+            label_pipeline: List[Operation] = [IntDecoder(), ToTensor(), ToDevice('cuda:0'), Squeeze()]
+            image_pipeline: List[Operation] = [SimpleRGBImageDecoder()]
+            if name == 'train':
+                image_pipeline.extend([
+                    RandomHorizontalFlip(),
+                    RandomTranslate(padding=2, fill=tuple(map(int, CIFAR_MEAN))),
+                    Cutout(4, tuple(map(int, CIFAR_MEAN))),
+                ])
             image_pipeline.extend([
-                RandomHorizontalFlip(),
-                RandomTranslate(padding=2, fill=tuple(map(int, CIFAR_MEAN))),
-                Cutout(4, tuple(map(int, CIFAR_MEAN))),
+                ToTensor(),
+                ToDevice('cuda:0', non_blocking=True),
+                ToTorchImage(),
+                Convert(torch.float16),
+                torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
             ])
-        image_pipeline.extend([
-            ToTensor(),
-            ToDevice('cuda:0', non_blocking=True),
-            ToTorchImage(),
-            Convert(torch.float16),
-            torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
-        ])
 
-        ordering = OrderOption.RANDOM if name == 'train' else OrderOption.SEQUENTIAL
+            ordering = OrderOption.QUASI_RANDOM if name == 'train' else OrderOption.SEQUENTIAL
 
-        loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
-                               order=ordering, drop_last=(name == 'train'),
-                               pipelines={'image': image_pipeline, 'label': label_pipeline})
+            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
+                                   order=ordering, drop_last=(name == 'train'), os_cache=True,
+                                   pipelines={'image': image_pipeline, 'label': label_pipeline})
+
+    else:
+        IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
+        IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
+        DEFAULT_CROP_RATIO = 224/256
+        paths = {
+                'train': os.path.join(args.data_dir, 'imnet_train.beton'),
+                'test': os.path.join(args.data_dir, 'imnet_val.beton')
+            }
+
+        loaders = {}
+
+        for name in ['train', 'test']:
+
+            res = 224
+
+            if name == 'train':
+                decoder = RandomResizedCropRGBImageDecoder((res, res))
+                image_pipeline: List[Operation] = [
+                    decoder,
+                    RandomHorizontalFlip(),
+                    ToTensor(),
+                    ToDevice('cuda:0', non_blocking=True),
+                    ToTorchImage(),
+                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+                ]
+            else:
+                cropper = CenterCropRGBImageDecoder((res, res), ratio=DEFAULT_CROP_RATIO)
+                image_pipeline = [
+                    cropper,
+                    ToTensor(),
+                    ToDevice('cuda:0', non_blocking=True),
+                    ToTorchImage(),
+                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+                ]
+
+
+            label_pipeline: List[Operation] = [
+                IntDecoder(),
+                ToTensor(),
+                Squeeze(),
+                ToDevice('cuda:0', non_blocking=True)
+            ]
+
+            order = OrderOption.QUASI_RANDOM if name=='train' else OrderOpton.SEQUENTIAL
+            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
+                                   order=ordering, drop_last=(name == 'train'),
+                                   pipelines={'image': image_pipeline, 'label': label_pipeline}, 
+                                   os_cache=False)
+
 
     trainloader_classifier = loaders['train']
     testloader = loaders['test']
 
 else:
     print('not using ffcv')
+
+    if args.data_set == 'IMNET':
+        assert False, "Need to use FFCV with imagenet"
     # Data
     print('==> Preparing data..')
     transform_train = transforms.Compose([
@@ -190,7 +259,7 @@ else:
 
 print('==> Building model..')
 n_cnn=args.ncnn
-net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size,
+net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size, num_classes=num_classes,
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim)
@@ -242,7 +311,7 @@ def train_classifier(epoch,n):
             inputs, targets = inputs.cuda(), targets.cuda()
 
         if args.mse:
-            targets_loss = nn.functional.one_hot(targets, num_classes=10).float()
+            targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
         else:
             targets_loss = targets
 
@@ -314,7 +383,7 @@ def test(epoch,n,ensemble=False):
                 inputs, targets = inputs.cuda(), targets.cuda()
 
             if args.mse:
-                targets_loss = nn.functional.one_hot(targets, num_classes=10).float()
+                targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
             else:
                 targets_loss = targets
 
@@ -405,9 +474,9 @@ for n in range(n_start, n_cnn):
 
     # decay the learning rate at each stage
     if n < 1:
-        args.lr /= 100
-    elif n == 2:
         args.lr /= 10
+#    elif n == 2:
+#        args.lr /= 10
     #elif n < n_cnn-1:
     #    args.lr /= 10
 

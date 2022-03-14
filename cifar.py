@@ -2,8 +2,6 @@
 from __future__ import print_function
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
-
 
 import torch
 import torch.nn as nn
@@ -50,8 +48,9 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
 parser.add_argument('--width_aux', default=128,type=int,help='auxillary width')
 parser.add_argument('--down', default='[1,2]', type=str,
                         help='layer at which to downsample')
-parser.add_argument('--seed', default=None, help="Fixes the CPU and GPU random seeds to a specified number")
-parser.add_argument('--separable', action='store_true', help='Whether to train a class-wise separable architecture')
+parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seeds to a specified number")
+parser.add_argument('--class_separable', action='store_true', help='Whether to train a class-wise separable architecture')
+parser.add_argument('--spatial_separable', action='store_true', help='Whether to train a spatially separable architecture')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -120,8 +119,8 @@ n_cnn=args.ncnn
 #else:
  #   from functools import partial
   #  block_conv_ = partial(ds_conv, ds_type=args.ds_type)
-if args.separable:
-    net = separableGreedyNet(separable_block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
+if args.class_separable or args.spatial_separable:
+    net = separableGreedyNet(separable_block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, spatial=args.spatial_separable, cls=args.class_separable)
 else:
     net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
     
@@ -131,10 +130,11 @@ if args.width_aux:
 else:
     num_feat = args.feature_size
 
-if args.separable:
+if args.class_separable or args.spatial_separable:
     net_c = separable_auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
                                  n_lin=args.nlin, feature_size=num_feat,
-                                 input_features=args.feature_size, batchn=args.bn)
+                                 input_features=args.feature_size, batchn=args.bn, 
+                                 cls=args.class_separable)
 
 else:
     net_c = auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
@@ -146,7 +146,7 @@ with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
     print(net_c, file=text_file)
 
-net = torch.nn.DataParallel(nn.Sequential(net,net_c)).cuda()
+net = nn.DataParallel(nn.Sequential(net,net_c)).cuda()
 cudnn.benchmark = True
 
 criterion_classifier = nn.CrossEntropyLoss()
@@ -301,7 +301,7 @@ for n in range(n_cnn):
         args.avg_size = int(args.avg_size/2)
         in_size = int(in_size/2)
 
-        if not args.separable:
+        if not args.class_separable:
             args.feature_size = int(args.feature_size*2)
             args.width_aux = args.width_aux * 2
 
@@ -312,10 +312,10 @@ for n in range(n_cnn):
 
     net_c = None
     if n < n_cnn-1:
-        if args.separable:
+        if args.class_separable or args.spatial_separable:
             net_c = separable_auxillary_classifier(avg_size=args.avg_size, in_size=in_size,
                                          n_lin=args.nlin, feature_size=args.width_aux,
-                                         input_features=args.feature_size, batchn=args.bn).cuda()
+                                         input_features=args.feature_size, batchn=args.bn, cls=args.class_separable).cuda()
             net.module[0].add_block(in_size, args.avg_size, n in downsample)
 
         else:
