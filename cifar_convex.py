@@ -93,7 +93,7 @@ if args.debug:
     args.nepochs = 1 # we run just one epoch per greedy layer training in debug mode
 
 downsample =  list(np.array(json.loads(args.down)))
-in_size=32
+in_size=224
 mode=0
 
 if args.seed is not None:
@@ -146,7 +146,7 @@ if args.ffcv:
     if args.data_set == 'CIFAR10':
         CIFAR_MEAN = [125.307, 122.961, 113.8575]
         CIFAR_STD = [51.5865, 50.847, 51.255]
-
+        in_size = 32
 
         paths = {
                 'train': os.path.join(args.data_dir, 'cifar_train.beton'),
@@ -192,6 +192,7 @@ if args.ffcv:
         for name in ['train', 'test']:
 
             res = 224
+            in_size = res
 
             if name == 'train':
                 decoder = RandomResizedCropRGBImageDecoder((res, res))
@@ -259,7 +260,7 @@ else:
 
 print('==> Building model..')
 n_cnn=args.ncnn
-net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, avg_size=args.avg_size, num_classes=num_classes,
+net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim)
