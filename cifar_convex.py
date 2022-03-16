@@ -2,7 +2,7 @@
 from __future__ import print_function
 
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
 
 import torch
 import torch.nn as nn
@@ -183,8 +183,8 @@ if args.ffcv:
         IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
         DEFAULT_CROP_RATIO = 224/256
         paths = {
-                'train': os.path.join(args.data_dir, 'imnet_train.beton'),
-                'test': os.path.join(args.data_dir, 'imnet_val.beton')
+                'train': os.path.join(args.data_dir, 'train_500_0.50_90.ffcv'),
+                'test': os.path.join(args.data_dir, 'val_500_0.50_90.ffcv')
             }
 
         loaders = {}
@@ -221,7 +221,7 @@ if args.ffcv:
                 ToDevice('cuda:0', non_blocking=True)
             ]
 
-            order = OrderOption.QUASI_RANDOM if name=='train' else OrderOpton.SEQUENTIAL
+            ordering = OrderOption.QUASI_RANDOM if name=='train' else OrderOption.SEQUENTIAL
             loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
                                    order=ordering, drop_last=(name == 'train'),
                                    pipelines={'image': image_pipeline, 'label': label_pipeline}, 

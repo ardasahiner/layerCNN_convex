@@ -96,10 +96,6 @@ class custom_cvx_layer(torch.nn.Module):
             
         x_downsized = self.downsample_data(x) # n x in_planes*k_eff*k_eff x avg_size x avg_size
 
-        with torch.no_grad():
-            sign_patterns = (F.conv2d(x, self.u_vectors, bias=self.bias_vectors, padding=self.padding) >= 0).float() # n x P x out_size * out_size
-
-        d_downsized = self.downsample_patterns(sign_patterns) # n x P*k_eff*k_eff x avg_size x avg_size
 
         # n x P*c*k_eff*k_eff x avg_size x avg_size
         if self.bias:
@@ -115,6 +111,13 @@ class custom_cvx_layer(torch.nn.Module):
 
         Xv_w = Xv_w.reshape((Xv_w.shape[0], self.k_eff*self.k_eff, self.num_classes, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
         Xv_w = Xv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+        
+        
+        with torch.no_grad():
+            sign_patterns = (F.conv2d(x, self.u_vectors, bias=self.bias_vectors, padding=self.padding) >= 0).float() # n x P x out_size * out_size
+
+        d_downsized = self.downsample_patterns(sign_patterns) # n x P*k_eff*k_eff x avg_size x avg_size
+
         DXv_w = d_downsized.unsqueeze(1) * Xv_w
         
         return DXv_w
