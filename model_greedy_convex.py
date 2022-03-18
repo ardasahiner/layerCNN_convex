@@ -55,6 +55,7 @@ class custom_cvx_layer(torch.nn.Module):
         self.k_eff = self.out_size//self.avg_size
 
         self.burer_monteiro = burer_monteiro
+        self.burer_dim = burer_dim
 
         if self.burer_monteiro:
             self.v = torch.nn.Parameter(data=torch.randn(planes*burer_dim, in_planes, kernel_size, kernel_size)/(in_planes*kernel_size*kernel_size*planes), requires_grad=True)
@@ -113,22 +114,25 @@ class custom_cvx_layer(torch.nn.Module):
             else:
                 Xv_w = torch.nn.functional.conv2d(x_downsized, self.v, groups = self.k_eff*self.k_eff)
             
+            Xv_w = Xv_w.reshape((Xv_w.shape[0], self.k_eff*self.k_eff, self.num_classes, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
+            Xv_w = Xv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
+            DXv_w = d_downsized.unsqueeze(1) * Xv_w
         else:
             if self.bias:
                 Xv_w = torch.nn.functional.conv2d(x, self.v, bias=self.v_bias, padding=self.padding)
             else:
                 Xv_w = torch.nn.functional.conv2d(x, self.v, padding=self.padding)
-            
-            Xv_w = self.downsample_data(Xv_w)
+           
+            DXv_w = sign_patterns.unsqueeze(1) * Xv_w.reshape((Xv_w.shape[0], self.burer_dim, self.P, self.out_size, self.out_size))
+            DXv_w = DXv_w.reshape((DXv_w.shape[0], -1, self.out_size, self.out_size))
+            DXv_w = self.downsample_data(DXv_w)
 
             if self.bias:
-                Xv_w = torch.nn.functional.conv2d(Xv_w, self.w, bias=self.w_bias, groups=self.k_eff*self.k_eff)
+                DXv_w = torch.nn.functional.conv2d(DXv_w, self.w, bias=self.w_bias, groups=self.k_eff*self.k_eff)
             else:
-                Xv_w = torch.nn.functional.conv2d(Xv_w, self.w, groups = self.k_eff*self.k_eff)
+                DXv_w = torch.nn.functional.conv2d(DXv_w, self.w, groups = self.k_eff*self.k_eff)
 
-        Xv_w = Xv_w.reshape((Xv_w.shape[0], self.k_eff*self.k_eff, self.num_classes, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4, 5)
-        Xv_w = Xv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
-        DXv_w = d_downsized.unsqueeze(1) * Xv_w
+            DXv_w = DXv_w.reshape((Xv_w.shape[0], self.num_classes, self.P*self.k_eff*self.k_eff, self.avg_size, self.avg_size))
         
         return DXv_w
 
@@ -191,9 +195,9 @@ class custom_cvx_layer(torch.nn.Module):
             next_representation = self.downsample_data.inverse(DXv_w.reshape((DXv_w.shape[0],-1, self.P, self.avg_size, self.avg_size)).permute(0, 2, 1, 3, 4))
         else:
             if self.bias:
-                Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, bias=self.aggregate_v_bias, padding=self.padding)
+                Xv_w = torch.nn.functional.conv2d(x, self.aggregate_v, bias=self.aggregate_v_bias, padding=self.padding)
             else:
-                Xv_w = torch.nn.functional.conv2d(x_downsized, self.aggregate_v, padding=self.padding)
+                Xv_w = torch.nn.functional.conv2d(x, self.aggregate_v, padding=self.padding)
             if self.nonneg_aggregate:
                 next_representation = torch.nn.ReLU()(Xv_w)
             else:
