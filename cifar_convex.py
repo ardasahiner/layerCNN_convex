@@ -93,7 +93,7 @@ if args.debug:
     args.nepochs = 1 # we run just one epoch per greedy layer training in debug mode
 
 downsample =  list(np.array(json.loads(args.down)))
-in_size=224
+in_size=32
 mode=0
 
 if args.seed is not None:
@@ -267,6 +267,9 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
+
+n_parameters = sum(p.numel() for p in net.parameters())
+print('number of params:', n_parameters)
 
 if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
