@@ -31,7 +31,7 @@ from typing import List
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
+parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -49,8 +49,13 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
                     help='number of data loading workers (default: 6)')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
+
+
 parser.add_argument('--sparsity', default=0.1, type=float,
                         help='sparsity of hyperplane generating arrangements')
+parser.add_argument('--signs_sgd', action='store_true', help='Whether to initialize sign patterns from SGD')
+parser.add_argument('--sgd_path', default='.', help='path to load SGD weights from')
+
 parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
@@ -75,7 +80,7 @@ parser.add_argument('--burer_dim', default =1, type=int, help='dimension of bure
 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
 parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'],
-                    type=str, help='Dataset path')
+                    type=str, help='Dataset name')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -260,10 +265,26 @@ else:
 
 print('==> Building model..')
 n_cnn=args.ncnn
+sign_pattern_weights = []
+sign_pattern_bias = []
+
+if args.signs_sgd:
+    sgd_model = torch.load(args.sgd_path)
+    sgd_blocks = sgd_model['net'].module[0] # should be blocks with CNN, BN, ReLU
+    sgd_blocks = sgd_blocks.blocks
+
+    for n in range(n_cnn):
+        for name, param in sgd_blocks[n].named_parameters():
+            if 'weight' in name:
+                sign_pattern_weights.append(param)
+            elif 'bias' in name:
+                sign_pattern_bias.append(param)
+
 net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
-                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim)
+                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
+                      sign_pattern_bias=sign_pattern_bias)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -478,11 +499,11 @@ for n in range(n_start, n_cnn):
 
     # decay the learning rate at each stage
     if n < 1:
+        args.lr /= 100
+    elif n == 2:
         args.lr /= 10
-#    elif n == 2:
-#        args.lr /= 10
-    #elif n < n_cnn-1:
-    #    args.lr /= 10
+    elif n < n_cnn-1:
+        args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
