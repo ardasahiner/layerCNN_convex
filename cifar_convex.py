@@ -18,7 +18,7 @@ from torch.cuda.amp import GradScaler, autocast
 import os
 import argparse
 
-from model_greedy_convex import *
+from model_greedy_convex_v3 import *
 from torch.autograd import Variable
 
 from utils import *
@@ -296,6 +296,7 @@ if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
 cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
@@ -498,12 +499,12 @@ for n in range(n_start, n_cnn):
     torch.cuda.empty_cache()
 
     # decay the learning rate at each stage
-    if n < 1:
-        args.lr /= 100
-    elif n == 2:
-        args.lr /= 10
-    elif n < n_cnn-1:
-        args.lr /= 10
+    #if n < 1:
+    #    args.lr /= 100
+    #elif n == 2:
+    #    args.lr /= 10
+    #elif n < n_cnn-1:
+    #    args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
