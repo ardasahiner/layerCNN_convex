@@ -13,6 +13,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import argparse
 
 from model_greedy import *
@@ -51,6 +52,7 @@ parser.add_argument('--down', default='[1,2]', type=str,
 parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--class_separable', action='store_true', help='Whether to train a class-wise separable architecture')
 parser.add_argument('--spatial_separable', action='store_true', help='Whether to train a spatially separable architecture')
+parser.add_argument('--gated_relu', action='store_true', help='Whether to replace ReLU with gated ReLU (for debugging purposes)')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -122,7 +124,7 @@ n_cnn=args.ncnn
 if args.class_separable or args.spatial_separable:
     net = separableGreedyNet(separable_block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, spatial=args.spatial_separable, cls=args.class_separable)
 else:
-    net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn)
+    net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, gated_relu=args.gated_relu)
     
 
 if args.width_aux:

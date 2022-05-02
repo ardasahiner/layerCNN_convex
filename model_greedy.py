@@ -2,27 +2,30 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from functools import partial
 
 
 class block_conv(nn.Module):
     expansion = 1
-    def __init__(self, in_planes, planes,downsample=False,batchn=True):
+    def __init__(self, in_planes, planes,downsample=False,batchn=True, bias=False, gated_relu=False):
         super(block_conv, self).__init__()
         self.downsample = downsample
         if downsample:
             self.down = psi(2)
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=1, padding=1, bias=bias)
         if batchn:
             self.bn1 = nn.BatchNorm2d(planes)
         else:
             self.bn1 = identity()  # Identity
 
+        self.relu = GatedReLU(gated_relu, in_planes, planes, bias)
+
     def forward(self, x):
         if self.downsample:
             x = self.down(x)
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.relu(x, self.bn1(self.conv1(x)))
         return out
 
 
@@ -177,36 +180,59 @@ class identity(nn.Module):
     def forward(self, input):
         return input
 
+class GatedReLU(nn.Module):
+    def __init__(self, gated_relu, in_planes, planes, bias):
+        super(GatedReLU, self).__init__()
+        self.gated_relu = gated_relu
+        self.relu = nn.ReLU()
+        if self.gated_relu:
+            self.sign_pattern_generator = nn.Conv2d(in_planes, planes, kernel_size=3, padding=1, bias=bias)
+        self.planes = planes
+
+    def forward(self, x, post_conv):
+        if self.gated_relu:
+            with torch.no_grad():
+                sign_patterns = self.sign_pattern_generator(x)
+            return (sign_patterns * post_conv)/math.sqrt(self.planes)
+        else:
+            return self.relu(post_conv)
 
 
 class greedyNet(nn.Module):
-    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True):
+    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True, gated_relu=False):
         super(greedyNet, self).__init__()
         self.in_planes = feature_size
         self.down_sampling = psi(downsampling)
         self.downsample_init = downsampling
-        self.conv1 = nn.Conv2d(3 * downsampling * downsampling, self.in_planes, kernel_size=3, stride=1, padding=1,
-                               bias=not batchnorm)
+        #self.conv1 = nn.Conv2d(3 * downsampling * downsampling, self.in_planes, kernel_size=3, stride=1, padding=1,
+        #                       bias=not batchnorm)
 
-        if batchnorm:
-            self.bn1 = nn.BatchNorm2d(self.in_planes)
-        else:
-            self.bn1 = identity()  # Identity
-        self.RELU = nn.ReLU()
+        #if batchnorm:
+        #    self.bn1 = nn.BatchNorm2d(self.in_planes)
+        #else:
+        #    self.bn1 = identity()  # Identity
+        #self.RELU = nn.ReLU()
         self.blocks = []
         self.block = block
-        self.blocks.append(nn.Sequential(self.conv1, self.bn1, self.RELU))  # n=0
+        #self.blocks.append(nn.Sequential(self.conv1, self.bn1, self.RELU))  # n=0
         self.batchn = batchnorm
-        for n in range(num_blocks - 1):
+        self.gated_relu = gated_relu
+        in_planes = 3
+        next_in_planes = self.in_planes
+        for n in range(num_blocks):
             print(n)
-            print(self.in_planes)
+            print(in_planes)
+            bias = not batchnorm if n==0 else False
             if n in downsample:
                 pre_factor = 4
-                self.blocks.append(block(self.in_planes * pre_factor, self.in_planes * 2,downsample=True, batchn=batchnorm))
-                self.in_planes = self.in_planes * 2
+                next_in_planes *= 2
+                self.blocks.append(block(in_planes * pre_factor, next_in_planes * 2,downsample=True, batchn=batchnorm, gated_relu=gated_relu, bias=bias))
             else:
-                self.blocks.append(block(self.in_planes, self.in_planes,batchn=batchnorm))
+                self.blocks.append(block(in_planes, next_in_planes,batchn=batchnorm, gated_relu=gated_relu, bias=bias))
             print(self.in_planes)
+            in_planes = next_in_planes
+
+        self.in_planes = next_in_planes
 
         self.blocks = nn.ModuleList(self.blocks)
         for n in range(num_blocks):
@@ -230,10 +256,10 @@ class greedyNet(nn.Module):
         if downsample:
             pre_factor = 4 # the old block needs this factor 4
             self.blocks.append(
-                self.block(self.in_planes * pre_factor, self.in_planes * 2, downsample=True, batchn=self.batchn))
+                self.block(self.in_planes * pre_factor, self.in_planes * 2, downsample=True, batchn=self.batchn, gated_relu=self.gated_relu))
             self.in_planes = self.in_planes * 2
         else:
-            self.blocks.append(self.block(self.in_planes, self.in_planes,batchn=self.batchn))
+            self.blocks.append(self.block(self.in_planes, self.in_planes,batchn=self.batchn, gated_relu=self.gated_relu))
 
     def forward(self, a):
         x = a[0]
@@ -246,4 +272,4 @@ class greedyNet(nn.Module):
         return out
 
 if __name__ == '__main__':
-    _ = greedyNet(block_conv, 5, feature_size=256, downsampling=1, downsample=[2, 3], batchnorm=True)
+    _ = greedyNet(block_conv, 5, feature_size=256, downsampling=1, downsample=[2, 3], batchnorm=False, gated_relu=True)

@@ -1,9 +1,6 @@
 "Greedy layerwise cifar training"
 from __future__ import print_function
 
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,7 +32,7 @@ parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
-parser.add_argument('--epochdecay',  default=20,type=int, help='number of epochs')
+parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
@@ -51,15 +48,19 @@ parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
 
 
-parser.add_argument('--sparsity', default=0.1, type=float,
+parser.add_argument('--sparsity', default=0.5, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--signs_sgd', action='store_true', help='Whether to initialize sign patterns from SGD')
 parser.add_argument('--sgd_path', default='.', help='path to load SGD weights from')
+parser.add_argument('--relu', action='store_true', 
+                        help='Replace Gated ReLU with ReLU (makes model non-convex and non Burer-Monteiro!). Used for sanity check')
 
 parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
+parser.add_argument('--gpu', default=0, type=int, help='Which GPU to use')
+
 parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
@@ -84,6 +85,8 @@ parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'
 
 args = parser.parse_args()
 opts = vars(args)
+
+os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 args.ensemble = args.ensemble>0
 args.bn = args.bn > 0
 if args.sparsity == 0:
@@ -284,7 +287,7 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias)
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -349,10 +352,7 @@ def train_classifier(epoch,n):
             loss = criterion_classifier(outputs, targets_loss)
 
             if args.group_norm:
-                if args.multi_gpu:
-                    loss += args.wd*torch.sum(torch.norm(net.module.blocks[n].v.reshape((net.module.blocks[n].v.shape[0], -1)), dim=1))
-                else:
-                    loss += args.wd*torch.sum(torch.norm(net.blocks[n].v.reshape((net.blocks[n].v.shape[0], -1)), dim=1))
+                loss += args.wd*net.nuclear_norm(n)
 
             train_loss += loss.item()
             _, predicted = torch.max(outputs.detach().data, 1)
@@ -381,6 +381,65 @@ def train_classifier(epoch,n):
 
     acc = 100.*float(correct)/float(total)
     return acc
+
+def check_dual_qualification(n):
+    print('\nChecking qualification constraint for stage: %d' % n)
+    net.train()
+    for k in range(n):
+        if args.multi_gpu:
+            net.module.blocks[k].eval()
+        else:
+            net.blocks[k].eval()
+
+    if args.multi_gpu:
+        _ = net.module.blocks[n].generate_Z()
+    else:
+        _= net.blocks[n].generate_Z()
+    
+    train_loss = 0
+    correct = 0
+    total = 0
+    for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
+        if use_cuda:
+            inputs, targets = inputs.cuda(), targets.cuda()
+
+        if args.mse:
+            targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
+        else:
+            targets_loss = targets
+
+
+        with autocast():
+            outputs = net.forward([inputs,n], transformed_model=True)
+
+            loss = criterion_classifier(outputs, targets_loss)
+
+            if args.group_norm:
+                loss += args.wd*net.nuclear_norm(n)
+
+            train_loss += loss.item()
+            _, predicted = torch.max(outputs.detach().data, 1)
+            total += targets.size(0)
+            correct += predicted.eq(targets.data).cpu().sum().item()
+
+        scaler.scale(loss).backward()
+        loss_pers=0
+
+
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
+
+    if args.multi_gpu:
+        relevant_params = net.module.blocks[n].generate_Z()
+        relevant_params = relevant_params.reshape((net.module.blocks[n].P, -1, net.module.blocks[n].in_planes*args.kernel_size*args.kernel_size))
+    else:
+        relevant_params = net.blocks[n].generate_Z()
+        relevant_params = relevant_params.reshape((net.blocks[n].P, -1, net.blocks[n].in_planes*args.kernel_size*args.kernel_size))
+
+    gradient_spectral_norm = torch.max(torch.linalg.matrix_norm(relevant_params, ord=2))
+    print('Gradient spectral norm', gradient_spectral_norm, 'beta', args.wd)
+
+    optimizer.zero_grad()
 
 n_start = 0
 
@@ -471,7 +530,7 @@ for n in range(n_start, n_cnn):
         optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
     elif args.optimizer == 'Adam':
         optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, int(1.5*args.epochdecay), 2*args.epochdecay, int(2.25*args.epochdecay)], 0.2, verbose=True)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, 2*args.epochdecay, int(3*args.epochdecay)], 0.2, verbose=True)
     scaler = GradScaler()
 
     for epoch in range(0, num_ep):
@@ -491,6 +550,8 @@ for n in range(n_start, n_cnn):
             break
 
         scheduler.step()
+    if args.burer_monteiro:
+        check_dual_qualification(n)
     
     del to_train
     del optimizer
@@ -501,8 +562,8 @@ for n in range(n_start, n_cnn):
     # decay the learning rate at each stage
     #if n < 1:
     #    args.lr /= 100
-    #elif n == 2:
-    #    args.lr /= 10
+    if n == 2 and not args.relu:
+        args.lr /= 10
     #elif n < n_cnn-1:
     #    args.lr /= 10
 
