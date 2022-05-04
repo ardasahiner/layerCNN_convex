@@ -168,132 +168,132 @@ elif args.data_set == 'IMNET':
 else:
     assert False, "dataset name not in CIFAR10, IMNET"
 
-if args.ffcv:
-    from ffcv.fields import IntField, RGBImageField
-    from ffcv.fields.decoders import IntDecoder, SimpleRGBImageDecoder
-    from ffcv.fields.rgb_image import CenterCropRGBImageDecoder, \
-        RandomResizedCropRGBImageDecoder
-    from ffcv.loader import Loader, OrderOption
-    from ffcv.pipeline.operation import Operation
-    from ffcv.transforms import RandomHorizontalFlip, Cutout, NormalizeImage, \
-        RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
-    from ffcv.transforms.common import Squeeze
-    from ffcv.writer import DatasetWriter
+#if args.ffcv:
+#    from ffcv.fields import IntField, RGBImageField
+#    from ffcv.fields.decoders import IntDecoder, SimpleRGBImageDecoder
+#    from ffcv.fields.rgb_image import CenterCropRGBImageDecoder, \
+#        RandomResizedCropRGBImageDecoder
+#    from ffcv.loader import Loader, OrderOption
+#    from ffcv.pipeline.operation import Operation
+#    from ffcv.transforms import RandomHorizontalFlip, Cutout, NormalizeImage, \
+#        RandomTranslate, Convert, ToDevice, ToTensor, ToTorchImage
+#    from ffcv.transforms.common import Squeeze
+#    from ffcv.writer import DatasetWriter
+#
+#    print('using ffcv')
+#
+#    if args.data_set == 'CIFAR10':
+#        CIFAR_MEAN = [125.307, 122.961, 113.8575]
+#        CIFAR_STD = [51.5865, 50.847, 51.255]
+#        in_size = 32
+#
+#        paths = {
+#                'train': os.path.join(args.data_dir, 'cifar_train.beton'),
+#                'test': os.path.join(args.data_dir, 'cifar_test.beton')
+#            }
+#
+#        loaders = {}
+#
+#        for name in ['train', 'test']:
+#            label_pipeline: List[Operation] = [IntDecoder(), ToTensor(), ToDevice('cuda:0'), Squeeze()]
+#            image_pipeline: List[Operation] = [SimpleRGBImageDecoder()]
+#            if name == 'train':
+#                image_pipeline.extend([
+#                    RandomHorizontalFlip(),
+#                    RandomTranslate(padding=2, fill=tuple(map(int, CIFAR_MEAN))),
+#                    Cutout(4, tuple(map(int, CIFAR_MEAN))),
+#                ])
+#            image_pipeline.extend([
+#                ToTensor(),
+#                ToDevice('cuda:0', non_blocking=True),
+#                ToTorchImage(),
+#                Convert(torch.float16),
+#                torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
+#            ])
+#
+#            ordering = OrderOption.QUASI_RANDOM if name == 'train' else OrderOption.SEQUENTIAL
+#
+#            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
+#                                   order=ordering, drop_last=(name == 'train'), os_cache=True,
+#                                   pipelines={'image': image_pipeline, 'label': label_pipeline})
+#
+#    else:
+#        IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
+#        IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
+#        DEFAULT_CROP_RATIO = 224/256
+#        paths = {
+#                'train': os.path.join(args.data_dir, 'train_500_0.50_90.ffcv'),
+#                'test': os.path.join(args.data_dir, 'val_500_0.50_90.ffcv')
+#            }
+#
+#        loaders = {}
+#
+#        for name in ['train', 'test']:
+#
+#            res = 224
+#            in_size = res
+#
+#            if name == 'train':
+#                decoder = RandomResizedCropRGBImageDecoder((res, res))
+#                image_pipeline: List[Operation] = [
+#                    decoder,
+#                    RandomHorizontalFlip(),
+#                    ToTensor(),
+#                    ToDevice('cuda:0', non_blocking=True),
+#                    ToTorchImage(),
+#                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+#                ]
+#            else:
+#                cropper = CenterCropRGBImageDecoder((res, res), ratio=DEFAULT_CROP_RATIO)
+#                image_pipeline = [
+#                    cropper,
+#                    ToTensor(),
+#                    ToDevice('cuda:0', non_blocking=True),
+#                    ToTorchImage(),
+#                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+#                ]
+#
+#
+#            label_pipeline: List[Operation] = [
+#                IntDecoder(),
+#                ToTensor(),
+#                Squeeze(),
+#                ToDevice('cuda:0', non_blocking=True)
+#            ]
+#
+#            ordering = OrderOption.QUASI_RANDOM if name=='train' else OrderOption.SEQUENTIAL
+#            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
+#                                   order=ordering, drop_last=(name == 'train'),
+#                                   pipelines={'image': image_pipeline, 'label': label_pipeline}, 
+#                                   os_cache=False)
+#
+#
+#    trainloader_classifier = loaders['train']
+#    testloader = loaders['test']
 
-    print('using ffcv')
+#else:
+print('not using ffcv')
 
-    if args.data_set == 'CIFAR10':
-        CIFAR_MEAN = [125.307, 122.961, 113.8575]
-        CIFAR_STD = [51.5865, 50.847, 51.255]
-        in_size = 32
+if args.data_set == 'IMNET':
+    assert False, "Need to use FFCV with imagenet"
+# Data
+print('==> Preparing data..')
+transform_train = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
 
-        paths = {
-                'train': os.path.join(args.data_dir, 'cifar_train.beton'),
-                'test': os.path.join(args.data_dir, 'cifar_test.beton')
-            }
+transform_test = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
 
-        loaders = {}
-
-        for name in ['train', 'test']:
-            label_pipeline: List[Operation] = [IntDecoder(), ToTensor(), ToDevice('cuda:0'), Squeeze()]
-            image_pipeline: List[Operation] = [SimpleRGBImageDecoder()]
-            if name == 'train':
-                image_pipeline.extend([
-                    RandomHorizontalFlip(),
-                    RandomTranslate(padding=2, fill=tuple(map(int, CIFAR_MEAN))),
-                    Cutout(4, tuple(map(int, CIFAR_MEAN))),
-                ])
-            image_pipeline.extend([
-                ToTensor(),
-                ToDevice('cuda:0', non_blocking=True),
-                ToTorchImage(),
-                Convert(torch.float16),
-                torchvision.transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
-            ])
-
-            ordering = OrderOption.QUASI_RANDOM if name == 'train' else OrderOption.SEQUENTIAL
-
-            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
-                                   order=ordering, drop_last=(name == 'train'), os_cache=True,
-                                   pipelines={'image': image_pipeline, 'label': label_pipeline})
-
-    else:
-        IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
-        IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
-        DEFAULT_CROP_RATIO = 224/256
-        paths = {
-                'train': os.path.join(args.data_dir, 'train_500_0.50_90.ffcv'),
-                'test': os.path.join(args.data_dir, 'val_500_0.50_90.ffcv')
-            }
-
-        loaders = {}
-
-        for name in ['train', 'test']:
-
-            res = 224
-            in_size = res
-
-            if name == 'train':
-                decoder = RandomResizedCropRGBImageDecoder((res, res))
-                image_pipeline: List[Operation] = [
-                    decoder,
-                    RandomHorizontalFlip(),
-                    ToTensor(),
-                    ToDevice('cuda:0', non_blocking=True),
-                    ToTorchImage(),
-                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
-                ]
-            else:
-                cropper = CenterCropRGBImageDecoder((res, res), ratio=DEFAULT_CROP_RATIO)
-                image_pipeline = [
-                    cropper,
-                    ToTensor(),
-                    ToDevice('cuda:0', non_blocking=True),
-                    ToTorchImage(),
-                    NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
-                ]
-
-
-            label_pipeline: List[Operation] = [
-                IntDecoder(),
-                ToTensor(),
-                Squeeze(),
-                ToDevice('cuda:0', non_blocking=True)
-            ]
-
-            ordering = OrderOption.QUASI_RANDOM if name=='train' else OrderOption.SEQUENTIAL
-            loaders[name] = Loader(paths[name], batch_size=args.batch_size, num_workers=args.workers,
-                                   order=ordering, drop_last=(name == 'train'),
-                                   pipelines={'image': image_pipeline, 'label': label_pipeline}, 
-                                   os_cache=False)
-
-
-    trainloader_classifier = loaders['train']
-    testloader = loaders['test']
-
-else:
-    print('not using ffcv')
-
-    if args.data_set == 'IMNET':
-        assert False, "Need to use FFCV with imagenet"
-    # Data
-    print('==> Preparing data..')
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
-
-    trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
-    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
+trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
+testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 # Model
 
@@ -415,8 +415,8 @@ def train_classifier(epoch,n):
                     print("n: %d parameter: %s size: %s changed by %.5f" % (n,param,net_cpu_dict[param].shape,diff),file=text_file)
 
 
-        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
-            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
+    progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+        % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     acc = 100.*float(correct)/float(total)
     return acc
@@ -470,8 +470,8 @@ def check_dual_qualification(n):
         loss_pers=0
 
 
-        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
-            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
+    progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+        % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     if args.multi_gpu:
         relevant_params = net.module.blocks[n].generate_Z()
@@ -525,13 +525,14 @@ def test(epoch,n,ensemble=False):
                 _, predicted = torch.max(outputs.detach().data, 1)
                 total += targets.size(0)
                 correct += predicted.eq(targets.data).cpu().sum().item()
-
-            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                % (test_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total))
-
+            
             if args.ensemble:
                 all_outs[n].append(outputs.data.cpu())
                 all_targs.append(targets.data.cpu())
+
+        progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+            % (test_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total))
+
         acc = 100. * float(correct) / float(total)
 
         if ensemble:
