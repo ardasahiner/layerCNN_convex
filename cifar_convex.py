@@ -28,7 +28,7 @@ from typing import List
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
+parser.add_argument('--lr', nargs='+', default=[0.1], type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
@@ -38,7 +38,7 @@ parser.add_argument('--feature_size',  default=256,type=int, help='feature size'
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
 parser.add_argument('--ensemble', default=1,type=int,help='compute ensemble')
 parser.add_argument('--name', default='',type=str,help='name')
-parser.add_argument('--batch_size', default=50,type=int,help='batch size')
+parser.add_argument('--batch_size', default=128,type=int,help='batch size')
 parser.add_argument('--bn', default=0,type=int,help='use batchnorm')
 parser.add_argument('--debug', default=0,type=int,help='debug')
 parser.add_argument('--debug_parameters', default=0,type=int,help='verification that layers frozen')
@@ -51,7 +51,7 @@ parser.add_argument('--down', default='[2, 3]', type=str,
 parser.add_argument('--sparsity', default=0.5, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--signs_sgd', action='store_true', help='Whether to initialize sign patterns from SGD')
-parser.add_argument('--sgd_path', default='.', help='path to load SGD weights from')
+parser.add_argument('--sgd_path', default='.', help='path to loadSGD weights from')
 parser.add_argument('--relu', action='store_true', 
                         help='Replace Gated ReLU with ReLU (makes model non-convex and non Burer-Monteiro!). Used for sanity check')
 
@@ -59,25 +59,32 @@ parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
 parser.add_argument('--multi_gpu', default=0, type=int,
                         help='use multiple gpus')
-parser.add_argument('--gpu', default=0, type=int, help='Which GPU to use')
+parser.add_argument('--gpu', default=None, type=int, help='Which GPU to use')
 
 parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seeds to a specified number")
 parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory to save checkpoints into')
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
-parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
+parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
+parser.add_argument('--reset_momentum', action='store_true', help='Whether to reset the momentum parameter every epochdecay epochs')
+
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
 
 parser.add_argument('--group_norm', action='store_true', help='Whether to use group norm penalty (otherwise, standard weight decay is used)')
-parser.add_argument('--wd', default=5e-4, type=float, help='regularization parameter')
+parser.add_argument('--wd', nargs='+', default=[5e-4], type=float, help='regularization parameter')
 parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
+parser.add_argument('--hinge_loss', action='store_true', help='Whether to enforce hinge loss')
+parser.add_argument('--lambda_hinge_loss', nargs='+', default=[1e-4], type=float, help='Hinge loss enforcement parameter')
+
+
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
 parser.add_argument('--nonneg_aggregate', action='store_true')
 parser.add_argument('--kernel_size', default=3, type=int, help='kernel size of convolutions')
 
 parser.add_argument('--burer_monteiro', action='store_true', help='Whether to use burer-monteiro factorization')
 parser.add_argument('--burer_dim', default =1, type=int, help='dimension of burer monteiro')
+parser.add_argument('--check_constraint', action='store_true', help='Whether to check qualification constraint')
 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
 parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'],
@@ -86,11 +93,33 @@ parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'
 args = parser.parse_args()
 opts = vars(args)
 
-os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+if args.gpu is not None:
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 args.ensemble = args.ensemble>0
 args.bn = args.bn > 0
 if args.sparsity == 0:
     args.sparsity = None
+
+if len(args.lr) == 1:
+    lr_list = [args.lr[0]]*args.ncnn
+else:
+    lr_list = args.lr
+if len(args.wd) == 1:
+    wd_list = [args.wd[0]]*args.ncnn
+else:
+    wd_list = args.wd
+if len(args.lambda_hinge_loss) == 1:
+    lambda_hinge_list = [args.lambda_hinge_loss[0]]*args.ncnn
+else:
+    lambda_hinge_list = args.lambda_hinge_loss
+
+for i in range(args.ncnn):
+    if wd_list[i] < 0:
+        wd_list[i] = 10**wd_list[i]
+    if lr_list[i] < 0:
+        lr_list[i] = 10**lr_list[i]
+    if lambda_hinge_list[i] < 0:
+        lambda_hinge_list[i] = 10**lambda_hinge_list[i]
 
 assert args.bn == False, 'batch norm not yet implemented'
 assert args.kernel_size %2 == 1, 'kernel size must be odd'
@@ -335,6 +364,7 @@ def train_classifier(epoch,n):
     train_loss = 0
     correct = 0
     total = 0
+    hinge_loss = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -352,7 +382,11 @@ def train_classifier(epoch,n):
             loss = criterion_classifier(outputs, targets_loss)
 
             if args.group_norm:
-                loss += args.wd*net.nuclear_norm(n)
+                loss += wd_list[n]*net.nuclear_norm(n)
+            if args.hinge_loss:
+                curr_hinge_loss = net.hinge_loss([inputs, n])
+                loss += lambda_hinge_list[n] * curr_hinge_loss
+                hinge_loss += lambda_hinge_list[n] * curr_hinge_loss.item()
 
             train_loss += loss.item()
             _, predicted = torch.max(outputs.detach().data, 1)
@@ -376,8 +410,8 @@ def train_classifier(epoch,n):
                     print("n: %d parameter: %s size: %s changed by %.5f" % (n,param,net_cpu_dict[param].shape,diff),file=text_file)
 
 
-        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
-            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     acc = 100.*float(correct)/float(total)
     return acc
@@ -399,6 +433,7 @@ def check_dual_qualification(n):
     train_loss = 0
     correct = 0
     total = 0
+    hinge_loss = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -415,7 +450,11 @@ def check_dual_qualification(n):
             loss = criterion_classifier(outputs, targets_loss)
 
             if args.group_norm:
-                loss += args.wd*net.nuclear_norm(n)
+                loss += wd_list[n]*net.nuclear_norm(n)
+            if args.hinge_loss:
+                curr_hinge_loss = net.hinge_loss([inputs, n])
+                loss += lambda_hinge_list * curr_hinge_loss
+                hinge_loss += lambda_hinge_list * curr_hinge_loss.item()
 
             train_loss += loss.item()
             _, predicted = torch.max(outputs.detach().data, 1)
@@ -426,8 +465,8 @@ def check_dual_qualification(n):
         loss_pers=0
 
 
-        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  losspers: %.3f'
-            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,loss_pers))
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     if args.multi_gpu:
         relevant_params = net.module.blocks[n].generate_Z()
@@ -437,7 +476,7 @@ def check_dual_qualification(n):
         relevant_params = relevant_params.reshape((net.blocks[n].P, -1, net.blocks[n].in_planes*args.kernel_size*args.kernel_size))
 
     gradient_spectral_norm = torch.max(torch.linalg.matrix_norm(relevant_params, ord=2))
-    print('Gradient spectral norm', gradient_spectral_norm, 'beta', args.wd)
+    print('Gradient spectral norm', gradient_spectral_norm, 'beta', wd_list[n])
 
     optimizer.zero_grad()
 
@@ -513,27 +552,38 @@ def test(epoch,n,ensemble=False):
 
 i=0
 num_ep = args.nepochs
-if args.group_norm:
-    wd = 0.0
-else:
-    wd = args.wd
 
 for n in range(n_start, n_cnn):
+    if args.group_norm:
+        wd = 0.0
+    else:
+        wd = wd_list[n]
     print('training stage', n)
     if args.multi_gpu:
         net.module.unfreezeGradient(n)
     else:
         net.unfreezeGradient(n)
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
-
+    lr = lr_list[n]
     if args.optimizer == 'SGD':
-        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
+        optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=wd)
     elif args.optimizer == 'Adam':
-        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, 2*args.epochdecay, int(3*args.epochdecay)], 0.2, verbose=True)
+        optimizer = optim.AdamW(to_train, lr=lr, weight_decay=wd)
+
+    if not args.reset_momentum:
+        scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
+
     scaler = GradScaler()
 
     for epoch in range(0, num_ep):
+        print('n: ',n)
+        if args.reset_momentum and epoch % args.epochdecay == 0 and epoch > 0:
+            lr=lr/5.0
+            if args.optimizer == 'SGD':
+                optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=wd)
+            elif args.optimizer == 'Adam':
+                optimizer = optim.AdamW(to_train, lr=lr, weight_decay=wd)
+            print('new lr:',lr)
         acc_train = train_classifier(epoch,n)
         if args.ensemble:
             acc_test,acc_test_ensemble = test(epoch,n,args.ensemble)
@@ -548,24 +598,18 @@ for n in range(n_start, n_cnn):
 
         if args.debug:
             break
+        if not args.reset_momentum:
+            scheduler.step()
 
-        scheduler.step()
-    if args.burer_monteiro:
+    if args.burer_monteiro and args.check_constraint:
         check_dual_qualification(n)
     
     del to_train
     del optimizer
-    del scheduler
+    if not args.reset_momentum:
+        del scheduler
     gc.collect()
     torch.cuda.empty_cache()
-
-    # decay the learning rate at each stage
-    #if n < 1:
-    #    args.lr /= 100
-    if n == 2 and not args.relu:
-        args.lr /= 10
-    #elif n < n_cnn-1:
-    #    args.lr /= 10
 
     if args.save_checkpoint:
         curr_sv_model = name_save_model + '_' + str(n) + '.pt'
@@ -589,13 +633,25 @@ if args.e2e_epochs > 0:
         net.unfreezeAll()
     to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
 
+    lr = lr_list[-1]
     if args.optimizer == 'SGD':
-        optimizer = optim.SGD(to_train, lr=args.lr, momentum=0.9, weight_decay=wd)
+        optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=wd)
     elif args.optimizer == 'Adam':
-        optimizer = optim.AdamW(to_train, lr=args.lr, weight_decay=wd)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochdecay, 2*args.epochdecay], 0.2, verbose=True)
+        optimizer = optim.AdamW(to_train, lr=lr, weight_decay=wd)
+
+    if not args.reset_momentum:
+        scheduler = optim.lr_scheduler.StepLR(optimizer, args.epochdecay, 0.2, verbose=True)
 
     for epoch in range(0, args.e2e_epochs):
+        if args.reset_momentum and epoch % args.epochdecay == 0 and epoch > 0:
+            lr=lr/5.0
+            if args.optimizer == 'SGD':
+                optimizer = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=wd)
+            elif args.optimizer == 'Adam':
+                optimizer = optim.AdamW(to_train, lr=lr, weight_decay=wd)
+            print('new lr:',lr)
+
+
         acc_train = train_classifier(epoch,n_cnn-1)
         if args.ensemble:
             acc_test,acc_test_ensemble = test(epoch,n_cnn-1,args.ensemble)
@@ -611,7 +667,8 @@ if args.e2e_epochs > 0:
         if args.debug:
             break
 
-        scheduler.step()
+        if not args.reset_momentum:
+            scheduler.step()
     
     del to_train
     del optimizer

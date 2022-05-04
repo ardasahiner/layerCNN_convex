@@ -111,7 +111,7 @@ class custom_cvx_layer(torch.nn.Module):
                 DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2)).reshape((N, -1,H, W))
             DX_Z = self.post_pooling(DX_Z) # n x P*m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, -1))
-            return self.fc(DX_Z)/self.P
+            return self.fc(DX_Z)
         elif self.burer_monteiro and transformed_model:
             X_Z = self.transformed_linear_operator(x)
             if self.relu:
@@ -120,7 +120,7 @@ class custom_cvx_layer(torch.nn.Module):
                 DX_Z = torch.einsum('NPhw, NPMhw -> NMhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
             DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, self.k_eff*self.k_eff, self.num_classes, self.k_eff*self.k_eff))
-            return (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)/self.P
+            return (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)
         else:
             X_Z = self.linear_operator(x) # N x P*m x h x w
             if self.relu:
@@ -169,7 +169,7 @@ class custom_cvx_layer(torch.nn.Module):
                 u, s, v = torch.svd(aggregate_v)
                 aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1)) # P x  h
                 aggregate_v = aggregate_v.reshape((self.P, self.in_planes, self.kernel_size, self.kernel_size)) # P x in_planes x kernel_size x kernel_size
-                self.aggregate_conv.weight.data = aggregate_v/self.P/self.k_eff/math.sqrt(self.num_classes)
+                self.aggregate_conv.weight.data = aggregate_v/self.k_eff/math.sqrt(self.num_classes)
 
                 if self.bias:
                     aggregate_bias = self.linear_operator.bias.data # P*c*k_eff*k_eff
@@ -202,13 +202,29 @@ class custom_cvx_layer(torch.nn.Module):
             if self.relu:
                 DX_Z = self.act(X_Z)
             else:
-                DX_Z = (sign_patterns * X_Z)/self.P
+                DX_Z = (sign_patterns * X_Z)
 
         return DX_Z.detach()
     
     def nuclear_norm(self):
         weights_reshaped = self.generate_Z()
         return torch.sum(torch.linalg.matrix_norm(weights_reshaped, 'nuc'))
+
+    def constraint_violation(self, x):
+        if not self.burer_monteiro:
+            return 0
+        with torch.no_grad():
+            if self.downsample:
+                x = self.down(x)
+
+            if not self.relu:
+                sign_patterns = 2*(self.sign_pattern_generator(x) > 0)-1 # N x P x h x w
+        
+        N, C, H, W = x.shape
+        X_Z = self.linear_operator(x) # N x P*m x h x w
+        DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2))
+
+        return torch.mean(F.relu(-DX_Z))*self.P
 
 class psi(nn.Module):
     def __init__(self, block_size):
@@ -305,6 +321,17 @@ class convexGreedyNet(nn.Module):
 
     def nuclear_norm(self, n):
         return self.blocks[n].nuclear_norm()
+
+    def hinge_loss(self, a):
+        x = a[0]
+        N = a[1]
+        out = x
+        for n in range(N + 1):
+            if n < N:
+                out = self.blocks[n].forward_next_stage(out).detach()
+            else:
+                out = self.blocks[n].constraint_violation(out)
+        return out
 
     def forward(self, a, transformed_model=False):
         x = a[0]
