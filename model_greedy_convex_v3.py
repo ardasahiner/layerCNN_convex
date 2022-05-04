@@ -210,7 +210,7 @@ class custom_cvx_layer(torch.nn.Module):
         weights_reshaped = self.generate_Z()
         return torch.sum(torch.linalg.matrix_norm(weights_reshaped, 'nuc'))
 
-    def constraint_violation(self, x):
+    def constraint_violation(self, x, squared_hinge=False):
         if not self.burer_monteiro:
             return 0
         with torch.no_grad():
@@ -224,7 +224,10 @@ class custom_cvx_layer(torch.nn.Module):
         X_Z = self.linear_operator(x) # N x P*m x h x w
         DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2))
 
-        return torch.mean(F.relu(-DX_Z))*self.P
+        if squared_hinge:
+            return torch.mean(F.relu(-DX_Z)**2)*self.P
+        else:
+            return torch.mean(F.relu(-DX_Z))*self.P
 
 class psi(nn.Module):
     def __init__(self, block_size):
@@ -322,7 +325,7 @@ class convexGreedyNet(nn.Module):
     def nuclear_norm(self, n):
         return self.blocks[n].nuclear_norm()
 
-    def hinge_loss(self, a):
+    def hinge_loss(self, a, squared_hinge=False):
         x = a[0]
         N = a[1]
         out = x
@@ -330,7 +333,7 @@ class convexGreedyNet(nn.Module):
             if n < N:
                 out = self.blocks[n].forward_next_stage(out).detach()
             else:
-                out = self.blocks[n].constraint_violation(out)
+                out = self.blocks[n].constraint_violation(out, squared_hinge)
         return out
 
     def forward(self, a, transformed_model=False):

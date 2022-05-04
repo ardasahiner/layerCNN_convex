@@ -7,6 +7,7 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 import numpy as np
 import gc
+import sys
 
 import torchvision
 import torchvision.transforms as transforms
@@ -76,6 +77,7 @@ parser.add_argument('--wd', nargs='+', default=[5e-4], type=float, help='regular
 parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss (otherwise, softmax cross-entropy is used)')
 parser.add_argument('--hinge_loss', action='store_true', help='Whether to enforce hinge loss')
 parser.add_argument('--lambda_hinge_loss', nargs='+', default=[1e-4], type=float, help='Hinge loss enforcement parameter')
+parser.add_argument('--squared_hinge', action='store_true', help='Whether to use squared hinge loss')
 
 
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
@@ -378,15 +380,18 @@ def train_classifier(epoch,n):
 
         with autocast():
             outputs = net.forward([inputs,n])
-
             loss = criterion_classifier(outputs, targets_loss)
 
             if args.group_norm:
                 loss += wd_list[n]*net.nuclear_norm(n)
             if args.hinge_loss:
-                curr_hinge_loss = net.hinge_loss([inputs, n])
+                curr_hinge_loss = net.hinge_loss([inputs, n], args.squared_hinge)
                 loss += lambda_hinge_list[n] * curr_hinge_loss
                 hinge_loss += lambda_hinge_list[n] * curr_hinge_loss.item()
+
+            if torch.isnan(loss):
+                print('nan loss!')
+                sys.exit(-1)
 
             train_loss += loss.item()
             _, predicted = torch.max(outputs.detach().data, 1)
@@ -452,7 +457,7 @@ def check_dual_qualification(n):
             if args.group_norm:
                 loss += wd_list[n]*net.nuclear_norm(n)
             if args.hinge_loss:
-                curr_hinge_loss = net.hinge_loss([inputs, n])
+                curr_hinge_loss = net.hinge_loss([inputs, n], args.squared_hinge)
                 loss += lambda_hinge_list * curr_hinge_loss
                 hinge_loss += lambda_hinge_list * curr_hinge_loss.item()
 
