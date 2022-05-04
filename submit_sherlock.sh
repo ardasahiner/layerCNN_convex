@@ -14,7 +14,7 @@ do
 					do
 						for ((hinge=0; hinge<=2; hinge+=1))
 						do
-							if [$hinge -gt 0]
+							if [ $hinge -gt 0 ]
 							then
 								for ((hinge0=-4; hinge0<=-1; hinge0+=1))
 								do
