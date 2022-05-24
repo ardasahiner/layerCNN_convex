@@ -91,6 +91,8 @@ parser.add_argument('--check_constraint', action='store_true', help='Whether to 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
 parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST', 'IMNET'],
                     type=str, help='Dataset name')
+parser.add_argument('--test_cifar101', action='store_true', 
+                    help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -329,6 +331,15 @@ else:
 
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+
+if args.test_cifar101:
+    X = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_data.npy'))
+    y = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_labels.npy'))
+    X = np.transpose(X, (0, 3, 1, 2))
+
+    testset = PrepareData(X, y)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+
 # Model
 
 print('==> Building model..')
@@ -513,7 +524,7 @@ def check_dual_qualification(n):
     optimizer.zero_grad()
     with open(name_log_txt, "a") as text_file:
         print("n: {}, epoch {}, spectral norm {}"
-              .format(n,epoch,gradient_spectral_norm), file=text_file)
+              .format(n,epoch,gradient_spectral_norm/wd_list[n]-1), file=text_file)
 
 n_start = 0
 

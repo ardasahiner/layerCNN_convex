@@ -105,11 +105,11 @@ def format_time(seconds):
 class PrepareData(torch.utils.data.Dataset):
     def __init__(self, X, y):
         if not torch.is_tensor(X):
-            self.X = torch.from_numpy(X)
+            self.X = torch.from_numpy(X).float()
         else:
             self.X = X
         if not torch.is_tensor(y):
-            self.y = torch.from_numpy(y)
+            self.y = torch.from_numpy(y).long()
         else:
             self.y = y
 
