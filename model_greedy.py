@@ -199,7 +199,7 @@ class GatedReLU(nn.Module):
 
 
 class greedyNet(nn.Module):
-    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True, gated_relu=False):
+    def __init__(self, block, num_blocks, feature_size=256, downsampling=1, downsample=[], batchnorm=True, gated_relu=False, in_planes=3):
         super(greedyNet, self).__init__()
         self.in_planes = feature_size
         self.down_sampling = psi(downsampling)
@@ -217,7 +217,6 @@ class greedyNet(nn.Module):
         #self.blocks.append(nn.Sequential(self.conv1, self.bn1, self.RELU))  # n=0
         self.batchn = batchnorm
         self.gated_relu = gated_relu
-        in_planes = 3
         next_in_planes = self.in_planes
         for n in range(num_blocks):
             print(n)

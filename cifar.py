@@ -53,6 +53,9 @@ parser.add_argument('--seed', default=0, help="Fixes the CPU and GPU random seed
 parser.add_argument('--class_separable', action='store_true', help='Whether to train a class-wise separable architecture')
 parser.add_argument('--spatial_separable', action='store_true', help='Whether to train a spatially separable architecture')
 parser.add_argument('--gated_relu', action='store_true', help='Whether to replace ReLU with gated ReLU (for debugging purposes)')
+parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST'],
+                    type=str, help='Dataset name')
+parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
 
 args = parser.parse_args()
 opts = vars(args)
@@ -95,23 +98,56 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 # Data
 print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+if args.data_set == 'CIFAR10':
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
 
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
 
-trainset_class = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=True, download=True,transform=transform_train)
+    trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
+    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
+
+elif args.data_set == 'STL10':
+    in_size = 96
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(96, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    
+    trainset_class = torchvision.datasets.STL10(root=args.data_dir, split='train', download=True,transform=transform_train)
+    testset = torchvision.datasets.STL10(root=args.data_dir, split='test', download=True, transform=transform_test)
+
+
+elif args.data_set == 'FMNIST':
+    in_planes = 1
+    in_size = 28
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5), (0.5)),
+    ])
+
+    trainset_class = torchvision.datasets.FashionMNIST(root=args.data_dir, train=True, download=True,transform=transform)
+    testset = torchvision.datasets.FashionMNIST(root=args.data_dir, train=False, download=True, transform=transform)
+
+else:
+    assert False, 'Something with dataset went wrong'
+
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root='/mnt/dense/sahiner', train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
-
 # Model
 
 print('==> Building model..')
@@ -124,7 +160,7 @@ n_cnn=args.ncnn
 if args.class_separable or args.spatial_separable:
     net = separableGreedyNet(separable_block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, spatial=args.spatial_separable, cls=args.class_separable)
 else:
-    net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, gated_relu=args.gated_relu)
+    net = greedyNet(block_conv, 1, args.feature_size, downsample=downsample, batchnorm=args.bn, gated_relu=args.gated_relu, in_planes=in_planes)
     
 
 if args.width_aux:

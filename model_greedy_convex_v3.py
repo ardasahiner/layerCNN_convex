@@ -54,6 +54,7 @@ class custom_cvx_layer(torch.nn.Module):
         self.padding = padding
         self.in_size = in_size
         self.in_planes = in_planes
+        self.nonneg_aggregate = nonneg_aggregate
 
         self.aggregate_conv = None
         self.aggregated = False
@@ -66,9 +67,15 @@ class custom_cvx_layer(torch.nn.Module):
             
             if sp_weight is not None:
                 u_vectors, bias_vectors = sp_weight, sp_bias
-                self.sign_pattern_generator.weight.data = u_vectors
+                if self.nonneg_aggregate and in_planes != 3:
+                    self.sign_pattern_generator.weight.data = torch.cat((u_vectors, u_vectors), 1)
+                else:
+                    self.sign_pattern_generator.weight.data = u_vectors
                 if bias:
-                    self.sign_pattern_generator.bias.data = bias_vectors
+                    if self.nonneg_aggregate and in_planes != 3:
+                        self.sign_pattern_generator.bias.data = torch.cat((bias_vectors, bias_vectors), 1)
+                    else:
+                        self.sign_pattern_generator.bias.data = bias_vectors
     #        else:
     #            u_vectors, bias_vectors = generate_sign_patterns(planes, kernel_size, 
     #                                    self.k_eff, in_planes, sparsity)
@@ -120,7 +127,8 @@ class custom_cvx_layer(torch.nn.Module):
                 DX_Z = torch.einsum('NPhw, NPMhw -> NMhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
             DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, self.k_eff*self.k_eff, self.num_classes, self.k_eff*self.k_eff))
-            return (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)
+            pred_transformed = (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)
+            return pred_transformed
         else:
             X_Z = self.linear_operator(x) # N x P*m x h x w
             if self.relu:
@@ -128,8 +136,8 @@ class custom_cvx_layer(torch.nn.Module):
             else:
                 DX_Z = torch.einsum('NPhw, NPMhw -> NMhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
             DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
-            DX_Z = DX_Z.reshape((N, self.num_classes, self.k_eff*self.k_eff, self.k_eff*self.k_eff))
-            return (torch.einsum('ncaa -> nc', DX_Z) + self.bias_operator)/self.P/self.k_eff/math.sqrt(self.num_classes)
+            DX_Z = DX_Z.reshape((N, self.k_eff*self.k_eff, self.num_classes, self.k_eff*self.k_eff))
+            return (torch.einsum('naca -> nc', DX_Z) + self.bias_operator)/self.k_eff/self.k_eff/math.sqrt(self.num_classes)
     
     def generate_Z(self, x=None):
         if not self.burer_monteiro:
@@ -145,7 +153,8 @@ class custom_cvx_layer(torch.nn.Module):
                     kernel_size=self.kernel_size, padding=self.padding, bias=self.bias)
                 self.transformed_linear_operator.weight.data = Z_eff_conv
 
-                self.transformed_bias_operator = nn.Parameter(self.fc.bias.data, requires_grad=False)
+                # self.transformed_bias_operator = nn.Parameter(torch.zeros(self.num_classes).to(Z_eff_conv.device), requires_grad=False)
+                self.transformed_bias_operator =  nn.Parameter(self.fc.bias.data, requires_grad=False)
 
                 if self.bias:
                     U_bias_data = self.linear_operator.bias.data.reshape((self.P, -1)) # P x m
@@ -153,7 +162,15 @@ class custom_cvx_layer(torch.nn.Module):
 
                 return Z_eff
             else:
-                return self.transformed_linear_operator.weight.grad
+                return self.transformed_linear_operator.weight
+
+    def get_Z_grad(self):
+        if not self.burer_monteiro:
+            return self.linear_operator.weight.grad
+        else:
+            if self.transformed_linear_operator is None:
+                self.generate_Z()
+            return self.transformed_linear_operator.weight.grad
         
     def _aggregate_weights(self):
         self.linear_operator.weight.requires_grad = False
@@ -169,7 +186,7 @@ class custom_cvx_layer(torch.nn.Module):
                 u, s, v = torch.svd(aggregate_v)
                 aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1)) # P x  h
                 aggregate_v = aggregate_v.reshape((self.P, self.in_planes, self.kernel_size, self.kernel_size)) # P x in_planes x kernel_size x kernel_size
-                self.aggregate_conv.weight.data = aggregate_v/self.k_eff/math.sqrt(self.num_classes)
+                self.aggregate_conv.weight.data = aggregate_v/self.k_eff/self.k_eff/math.sqrt(self.num_classes)
 
                 if self.bias:
                     aggregate_bias = self.linear_operator.bias.data # P*c*k_eff*k_eff
@@ -203,6 +220,8 @@ class custom_cvx_layer(torch.nn.Module):
                 DX_Z = self.act(X_Z)
             else:
                 DX_Z = (sign_patterns * X_Z)
+                if self.nonneg_aggregate:
+                    DX_Z = torch.cat((F.relu(DX_Z), F.relu(-DX_Z)), dim=1)
 
         return DX_Z.detach()
     
@@ -259,7 +278,7 @@ class convexGreedyNet(nn.Module):
     def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
-                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False):
+                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -270,27 +289,28 @@ class convexGreedyNet(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size//2
         
-        in_planes = 3
         next_in_planes = self.in_planes
 
         for n in range(num_blocks):
             sp_weight = sign_pattern_weights[n] if len(sign_pattern_weights) > n else None
             sp_bias = sign_pattern_bias[n] if len(sign_pattern_bias) > n else None
+            pre_factor = 1
+            if nonneg_aggregate and n != 0:
+                pre_factor *= 2
 
             if n in downsample:
-                pre_factor = 4
+                pre_factor *= 4
                 avg_size = avg_size // 2
                 in_size = in_size // 2
                 if n > 2 or (burer_monteiro and burer_dim < 4):
                     next_in_planes = next_in_planes * 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
-                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=n < 1, 
+                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu))
             else:
-                pre_factor = 1
-                self.blocks.append(block(in_planes, next_in_planes, in_size, kernel_size=self.kernel_size,
+                self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,

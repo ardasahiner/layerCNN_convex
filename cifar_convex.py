@@ -89,7 +89,7 @@ parser.add_argument('--burer_dim', default =1, type=int, help='dimension of bure
 parser.add_argument('--check_constraint', action='store_true', help='Whether to check qualification constraint')
 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
-parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'IMNET'],
+parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST', 'IMNET'],
                     type=str, help='Dataset name')
 
 args = parser.parse_args()
@@ -159,14 +159,14 @@ with open(name_log_txt, "a") as text_file:
 
 use_cuda = torch.cuda.is_available()
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
+in_planes = 3
 
-
-if args.data_set == 'CIFAR10':
+if args.data_set == 'CIFAR10' or args.data_set == 'STL10' or args.data_set == 'FMNIST':
     num_classes = 10
 elif args.data_set == 'IMNET':
     num_classes = 1000
 else:
-    assert False, "dataset name not in CIFAR10, IMNET"
+    assert False, "dataset name not in CIFAR10, STL10, FMNIST, IMNET"
 
 #if args.ffcv:
 #    from ffcv.fields import IntField, RGBImageField
@@ -278,23 +278,57 @@ if args.data_set == 'IMNET':
     assert False, "Need to use FFCV with imagenet"
 # Data
 print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
 
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
+if args.data_set == 'CIFAR10':
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
 
-trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    trainset_class = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True,transform=transform_train)
+    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
+
+elif args.data_set == 'STL10':
+    in_size = 96
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(96, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])
+    
+    trainset_class = torchvision.datasets.STL10(root=args.data_dir, split='train', download=True,transform=transform_train)
+    testset = torchvision.datasets.STL10(root=args.data_dir, split='test', download=True, transform=transform_test)
+
+
+elif args.data_set == 'FMNIST':
+    in_planes = 1
+    in_size = 28
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5), (0.5)),
+    ])
+
+    trainset_class = torchvision.datasets.FashionMNIST(root=args.data_dir, train=True, download=True,transform=transform)
+    testset = torchvision.datasets.FashionMNIST(root=args.data_dir, train=False, download=True, transform=transform)
+
+else:
+    assert False, 'Something with dataset went wrong'
+
 trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
-
 # Model
 
 print('==> Building model..')
@@ -318,7 +352,7 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias, relu=args.relu)
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -401,7 +435,6 @@ def train_classifier(epoch,n):
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        loss_pers=0
 
         if args.debug_parameters:
             if args.multi_gpu:
@@ -415,11 +448,11 @@ def train_classifier(epoch,n):
                     print("n: %d parameter: %s size: %s changed by %.5f" % (n,param,net_cpu_dict[param].shape,diff),file=text_file)
 
 
-    progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
-        % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     acc = 100.*float(correct)/float(total)
-    return acc
+    return acc, train_loss/(batch_idx+1)
 
 def check_dual_qualification(n):
     print('\nChecking qualification constraint for stage: %d' % n)
@@ -431,14 +464,15 @@ def check_dual_qualification(n):
             net.blocks[k].eval()
 
     if args.multi_gpu:
-        _ = net.module.blocks[n].generate_Z()
+        _ = net.module.blocks[n].get_Z_grad()
     else:
-        _= net.blocks[n].generate_Z()
+        _ = net.blocks[n].get_Z_grad()
     
     train_loss = 0
     correct = 0
     total = 0
     hinge_loss = 0
+
     for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -448,42 +482,38 @@ def check_dual_qualification(n):
         else:
             targets_loss = targets
 
+        outputs = net.forward([inputs,n], transformed_model=True)
+        loss = criterion_classifier(outputs, targets_loss)
+        #if args.hinge_loss:
+        #    curr_hinge_loss = net.hinge_loss([inputs, n], args.squared_hinge)
+        #    loss += lambda_hinge_list * curr_hinge_loss
+        #    hinge_loss += lambda_hinge_list * curr_hinge_loss.item()
 
-        with autocast():
-            outputs = net.forward([inputs,n], transformed_model=True)
+        train_loss += loss.item()
+        _, predicted = torch.max(outputs.detach().data, 1)
+        total += targets.size(0)
+        correct += predicted.eq(targets.data).cpu().sum().item()
+        
+        loss = loss*len(inputs)/len(trainset_class)
+        loss.backward()
 
-            loss = criterion_classifier(outputs, targets_loss)
-
-            if args.group_norm:
-                loss += wd_list[n]*net.nuclear_norm(n)
-            if args.hinge_loss:
-                curr_hinge_loss = net.hinge_loss([inputs, n], args.squared_hinge)
-                loss += lambda_hinge_list * curr_hinge_loss
-                hinge_loss += lambda_hinge_list * curr_hinge_loss.item()
-
-            train_loss += loss.item()
-            _, predicted = torch.max(outputs.detach().data, 1)
-            total += targets.size(0)
-            correct += predicted.eq(targets.data).cpu().sum().item()
-
-        scaler.scale(loss).backward()
-        loss_pers=0
-
-
-    progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
-        % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
 
     if args.multi_gpu:
-        relevant_params = net.module.blocks[n].generate_Z()
+        relevant_params = net.module.blocks[n].get_Z_grad()
         relevant_params = relevant_params.reshape((net.module.blocks[n].P, -1, net.module.blocks[n].in_planes*args.kernel_size*args.kernel_size))
     else:
-        relevant_params = net.blocks[n].generate_Z()
+        relevant_params = net.blocks[n].get_Z_grad()
         relevant_params = relevant_params.reshape((net.blocks[n].P, -1, net.blocks[n].in_planes*args.kernel_size*args.kernel_size))
 
-    gradient_spectral_norm = torch.max(torch.linalg.matrix_norm(relevant_params, ord=2))
-    print('Gradient spectral norm', gradient_spectral_norm, 'beta', wd_list[n])
+    gradient_spectral_norm = torch.max(torch.linalg.matrix_norm(relevant_params, ord=2)).item()
+    print('Gradient spectral norm bound', gradient_spectral_norm/wd_list[n] - 1)
 
     optimizer.zero_grad()
+    with open(name_log_txt, "a") as text_file:
+        print("n: {}, epoch {}, spectral norm {}"
+              .format(n,epoch,gradient_spectral_norm), file=text_file)
 
 n_start = 0
 
@@ -530,8 +560,8 @@ def test(epoch,n,ensemble=False):
                 all_outs[n].append(outputs.data.cpu())
                 all_targs.append(targets.data.cpu())
 
-        progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (test_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total))
+            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                % (test_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total))
 
         acc = 100. * float(correct) / float(total)
 
@@ -590,7 +620,7 @@ for n in range(n_start, n_cnn):
             elif args.optimizer == 'Adam':
                 optimizer = optim.AdamW(to_train, lr=lr, weight_decay=wd)
             print('new lr:',lr)
-        acc_train = train_classifier(epoch,n)
+        acc_train, loss_train = train_classifier(epoch,n)
         if args.ensemble:
             acc_test,acc_test_ensemble = test(epoch,n,args.ensemble)
 
