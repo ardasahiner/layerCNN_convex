@@ -87,6 +87,7 @@ parser.add_argument('--kernel_size', default=3, type=int, help='kernel size of c
 parser.add_argument('--burer_monteiro', action='store_true', help='Whether to use burer-monteiro factorization')
 parser.add_argument('--burer_dim', default =1, type=int, help='dimension of burer monteiro')
 parser.add_argument('--check_constraint', action='store_true', help='Whether to check qualification constraint')
+parser.add_argument('--check_stationary', action='store_true', help='Whether to check stationarity of convolutional weights')
 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
 parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST', 'IMNET'],
@@ -465,6 +466,57 @@ def train_classifier(epoch,n):
     acc = 100.*float(correct)/float(total)
     return acc, train_loss/(batch_idx+1)
 
+
+def check_stationarity(n):
+    print('\nChecking stationarity for stage: %d' % n)
+    net.train()
+    for k in range(n):
+        if args.multi_gpu:
+            net.module.blocks[k].eval()
+        else:
+            net.blocks[k].eval()
+
+    train_loss = 0
+    correct = 0
+    total = 0
+    hinge_loss = 0
+
+    for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
+        if use_cuda:
+            inputs, targets = inputs.cuda(), targets.cuda()
+
+        if args.mse:
+            targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
+        else:
+            targets_loss = targets
+
+        outputs = net.forward([inputs,n])
+        loss = criterion_classifier(outputs, targets_loss) + wd_list[n]/2 * torch.norm(net.blocks[n].linear_operator.weight)**2
+        #if args.hinge_loss:
+        #    curr_hinge_loss = net.hinge_loss([inputs, n], args.squared_hinge)
+        #    loss += lambda_hinge_list * curr_hinge_loss
+        #    hinge_loss += lambda_hinge_list * curr_hinge_loss.item()
+
+        train_loss += loss.item()
+        _, predicted = torch.max(outputs.detach().data, 1)
+        total += targets.size(0)
+        correct += predicted.eq(targets.data).cpu().sum().item()
+        
+        loss = loss*len(inputs)/len(trainset_class)
+        loss.backward()
+
+        progress_bar(batch_idx, len(trainloader_classifier), 'Loss: %.3f | Acc: %.3f%% (%d/%d) |  Hinge Loss: %.3f'
+            % (train_loss/(batch_idx+1), 100.*float(correct)/float(total), correct, total,hinge_loss/(batch_idx+1)))
+
+    if args.multi_gpu:
+        relevant_params = net.module.blocks[n].linear_operator.weight.grad
+    else:
+        relevant_params = net.blocks[n].linear_operator.weight.grad
+
+    print('Gradient norm', torch.norm(relevant_params))
+
+    optimizer.zero_grad()
+
 def check_dual_qualification(n):
     print('\nChecking qualification constraint for stage: %d' % n)
     net.train()
@@ -636,17 +688,20 @@ for n in range(n_start, n_cnn):
             acc_test,acc_test_ensemble = test(epoch,n,args.ensemble)
 
             with open(name_log_txt, "a") as text_file:
-                print("n: {}, epoch {}, train {}, test {},ense {} "
-                      .format(n,epoch,acc_train,acc_test,acc_test_ensemble), file=text_file)
+                print("n: {}, epoch {}, train loss {}, train {}, test {},ense {} "
+                      .format(n,epoch,loss_train,acc_train,acc_test,acc_test_ensemble), file=text_file)
         else:
             acc_test = test(epoch, n)
             with open(name_log_txt, "a") as text_file:
-                print("n: {}, epoch {}, train {}, test {}, ".format(n,epoch,acc_train,acc_test), file=text_file)
+                print("n: {}, epoch {}, train loss {}, train {}, test {}, ".format(n,epoch,loss_train,acc_train,acc_test), file=text_file)
 
         if args.debug:
             break
         if not args.reset_momentum:
             scheduler.step()
+
+    if args.burer_monteiro and args.check_stationary:
+        check_stationarity(n)
 
     if args.burer_monteiro and args.check_constraint:
         check_dual_qualification(n)
