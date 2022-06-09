@@ -23,7 +23,7 @@ _, term_width = os.popen('stty size', 'r').read().split()
 term_width = int(term_width)
 #term_width = 80
 
-TOTAL_BAR_LENGTH = 65.
+TOTAL_BAR_LENGTH = 20.
 last_time = time.time()
 begin_time = last_time
 def progress_bar(current, total, msg=None):

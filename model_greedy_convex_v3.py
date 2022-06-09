@@ -30,8 +30,8 @@ class custom_cvx_layer(torch.nn.Module):
     def __init__(self, in_planes, planes, in_size=32,
                  kernel_size=3, padding=1, avg_size=16, num_classes=10,
                  bias=False, downsample=False, sparsity=None, feat_aggregate='random',
-                 nonneg_aggregate=False, burer_monteiro=False, burer_dim=10,
-                 sp_weight=None, sp_bias=None, relu=False):
+                 nonneg_aggregate=False, burer_monteiro=False, burer_dim=1,
+                 sp_weight=None, sp_bias=None, relu=False, lambd=1e-10):
         super(custom_cvx_layer, self).__init__()
 
         self.P = planes
@@ -58,6 +58,9 @@ class custom_cvx_layer(torch.nn.Module):
 
         self.aggregate_conv = None
         self.aggregated = False
+        self.decomposed_conv = None
+        self.decomposed = False
+        self.lambd = lambd
 
         self.post_pooling = nn.AvgPool2d(kernel_size=avg_size)
         self.relu = relu
@@ -83,9 +86,8 @@ class custom_cvx_layer(torch.nn.Module):
             self.sign_pattern_generator.weight.requires_grad = False
             if bias:
                 self.sign_pattern_generator.bias.requires_grad = False
-        else:
-            self.act = nn.ReLU()
-
+        
+        self.act = nn.ReLU()
 
         if self.burer_monteiro:
             self.linear_operator = nn.Conv2d(in_planes, planes*self.burer_dim, 
@@ -115,8 +117,10 @@ class custom_cvx_layer(torch.nn.Module):
             del dummy_lin_operator
             del dummy_fc
 
+        self.rep = None
 
-    def forward(self, x, transformed_model=False):
+
+    def forward(self, x, transformed_model=False, store_activations=False):
         # pre-compute sign patterns and downsampling before computational graph necessary
         with torch.no_grad():
             if self.downsample:
@@ -128,12 +132,24 @@ class custom_cvx_layer(torch.nn.Module):
         N, C, H, W = x.shape
         # for burer-monteiro, m = burer_dim, otherwise m = c * k_eff * k_eff
 
+
+        if self.decomposed:
+            X_Z = self.decomposed_conv(x)
+            DX_Z = self.act(X_Z)
+            DX_Z = self.post_pooling(DX_Z) # n x P*m x k_eff x k_eff
+            DX_Z = DX_Z.reshape((N, -1))
+            return self.fc(DX_Z[:, :DX_Z.shape[1]//2] - DX_Z[:, DX_Z.shape[1]//2:])
+
         if self.burer_monteiro and not transformed_model:
             X_Z = self.linear_operator(x) # N x P*m x h x w
             if self.relu:
                 DX_Z = self.act(X_Z)
             else:
                 DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2)).reshape((N, -1,H, W))
+
+            if store_activations:
+                self.rep = DX_Z.detach()
+
             DX_Z = self.post_pooling(DX_Z) # n x P*m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, -1))
             return self.fc(DX_Z)
@@ -153,6 +169,8 @@ class custom_cvx_layer(torch.nn.Module):
                 DX_Z = self.act(X_Z)
             else:
                 DX_Z = torch.einsum('NPhw, NPMhw -> NMhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
+            if store_activations:
+                self.rep = DX_Z.detach()
             DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, self.k_eff*self.k_eff, self.num_classes, self.k_eff*self.k_eff))
             return (torch.einsum('naca -> nc', DX_Z) + self.bias_operator)
@@ -197,26 +215,9 @@ class custom_cvx_layer(torch.nn.Module):
 
         self.aggregate_conv = nn.Conv2d(self.in_planes, self.P, kernel_size=self.kernel_size, 
                 padding=self.padding, bias=self.bias)
-        if not self.burer_monteiro:
-            if self.feat_aggregate == 'weight_rankone':
-                aggregate_v = self.linear_operator.weight.data # P*c*k_eff*k_eff x in_planes x kernel_size x kernel_size
-                aggregate_v = aggregate_v.reshape((self.P, -1, self.in_planes*self.kernel_size*self.kernel_size)).permute(0, 2, 1) # P x h x ac
-                u, s, v = torch.svd(aggregate_v)
-                aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1)) # P x  h
-                aggregate_v = aggregate_v.reshape((self.P, self.in_planes, self.kernel_size, self.kernel_size)) # P x in_planes x kernel_size x kernel_size
-                self.aggregate_conv.weight.data = aggregate_v/self.k_eff/self.k_eff/math.sqrt(self.num_classes)
-
-                if self.bias:
-                    aggregate_bias = self.linear_operator.bias.data # P*c*k_eff*k_eff
-                    aggregate_bias = aggregate_bias.reshape((self.P, -1))
-                    aggregate_bias = torch.sqrt(torch.norm(aggregate_bias, dim=1)) # P
-                    self.aggregate_conv.bias.data = aggregate_bias/self.k_eff/math.sqrt(self.num_classes)
-        else:
-            self.fc.weight.requires_grad = False
-            self.fc.bias.requires_grad = False
-            self.aggregate_conv.weight.data = self.linear_operator.weight.data
-            if self.bias:
-                self.aggregate_conv.bias.data = self.linear_operator.bias.data
+        self.aggregate_conv.weight.data = self.linear_operator.weight.data
+        if self.bias:
+            self.aggregate_conv.bias.data = self.linear_operator.bias.data
 
         self.aggregate_conv.weight.requires_grad = False
         if self.bias:
@@ -230,23 +231,67 @@ class custom_cvx_layer(torch.nn.Module):
                 self._aggregate_weights()
             if self.downsample:
                 x = self.down(x)
-            if not self.relu:
+            if not self.relu and not self.decomposed:
                 sign_patterns = self.sign_pattern_generator(x) > 0 # N x P x h x w
-            X_Z = self.aggregate_conv(x) # N x P*m x h x w
 
-            if self.relu:
-                DX_Z = self.act(X_Z)
+            if not self.decomposed:
+                X_Z = self.aggregate_conv(x) # N x P*m x h x w
+
+                if self.relu:
+                    DX_Z = self.act(X_Z)
+                else:
+                    DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((x.shape[0], self.P, self.burer_dim, x.shape[-2], x.shape[-1]))
+                    DX_Z = DX_Z.reshape((x.shape[0], -1, x.shape[-2], x.shape[-1]))
+                    if self.nonneg_aggregate:
+                        DX_Z = torch.cat((F.relu(DX_Z), F.relu(-DX_Z)), dim=1)
             else:
-                DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((x.shape[0], self.P, self.burer_dim, x.shape[-2], x.shape[-1]))
-                DX_Z = DX_Z.reshape((x.shape[0], -1, x.shape[-2], x.shape[-1]))
-                if self.nonneg_aggregate:
-                    DX_Z = torch.cat((F.relu(DX_Z), F.relu(-DX_Z)), dim=1)
+                X_Z = self.decomposed_conv(x)
+                DX_Z = self.act(X_Z)
 
         return DX_Z.detach()
     
     def nuclear_norm(self):
         weights_reshaped = self.generate_Z()
         return torch.sum(torch.linalg.matrix_norm(weights_reshaped, 'nuc'))
+
+    def prepare_decomposition(self):
+        if not self.decomposed:
+            if not self.aggregated:
+                self._aggregate_weights()
+
+            # decompose aggregated convs into two convs--one per layer
+            self.decomposed_conv = nn.Conv2d(self.in_planes, 2*self.aggregate_conv.weight.shape[0], kernel_size=self.kernel_size,
+                                    padding=self.padding, bias=self.bias).to(self.aggregate_conv.weight.device)
+            self.decomposed = True
+
+    def decompose_weights(self, x):
+        with torch.no_grad():
+            if self.downsample:
+                x = self.down(x)
+            N, C, H, W = x.shape
+
+            if not self.relu:
+                sign_patterns = 2*(self.sign_pattern_generator(x) > 0)-1 # N x P x h x w
+            
+            X_Z = self.aggregate_conv(x) # N x P*m x h x w
+            DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((N, self.P, self.burer_dim, H, W))
+            DX_Z = DX_Z.reshape((N, -1, H, W))
+            regress_term = self.act(-DX_Z)
+        
+        X_Y = self.decomposed_conv(x)[:, :regress_term.shape[1]]
+        DX_Y = sign_patterns.unsqueeze(2) * X_Y.reshape((N, self.P, self.burer_dim, H, W))
+        DX_Y = DX_Y.reshape((N, -1, H, W))
+
+        return 1/(N*self.P*self.burer_dim*H*W*2)*torch.norm(self.act(regress_term - DX_Y))**2 + self.lambd/self.P * torch.norm(self.decomposed_conv.weight[:regress_term.shape[1]])
+
+    def complete_decomposition(self):
+        self.decomposed_conv.weight.data[self.aggregate_conv.weight.shape[0]:] = self.aggregate_conv.weight.data + self.decomposed_conv.weight.data[:self.aggregate_conv.weight.shape[0]]
+        self.decomposed_conv.weight.requires_grad = False
+        if self.bias:
+            self.decomposed_conv.bias.data[self.aggregate_conv.weight.shape[0]:] = self.aggregate_conv.bias.data + self.decomposed_conv.bias.data[:self.aggregate_conv.weight.shape[0]]
+            self.decomposed_conv.bias.requires_grad = False
+
+        print(torch.norm(self.decomposed_conv.weight.data))
 
     def constraint_violation(self, x, squared_hinge=False):
         if not self.burer_monteiro:
@@ -297,7 +342,8 @@ class convexGreedyNet(nn.Module):
     def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
-                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3):
+                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
+                 lambd=1e-10):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -315,11 +361,15 @@ class convexGreedyNet(nn.Module):
             sp_bias = sign_pattern_bias[n] if len(sign_pattern_bias) > n else None
             pre_factor = 1
 
-            if burer_monteiro and n != 0:
-                pre_factor *= burer_dim
-
-            if nonneg_aggregate and n != 0:
-                pre_factor *= 2
+            if n != 0:
+                if burer_monteiro:
+                    pre_factor *= burer_dim
+                else:
+                    in_planes = (in_size//avg_size)*(in_size//avg_size)*num_classes
+                if nonneg_aggregate:
+                    pre_factor *= 2
+                if decompose:
+                    pre_factor *= 2
 
             if n in downsample:
                 pre_factor *= 4
@@ -331,22 +381,22 @@ class convexGreedyNet(nn.Module):
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
-                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu))
+                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd))
             else:
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
-                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu))
+                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd))
     
             print(n)
             print(pre_factor*in_planes, next_in_planes)
             in_planes = next_in_planes
 
         self.blocks = nn.ModuleList(self.blocks)
-        for n in range(num_blocks):
-            for p in self.blocks[n].parameters():
-                p.requires_grad = False
+    #    for n in range(num_blocks):
+    #        for p in self.blocks[n].parameters():
+    #            p.requires_grad = False
 
     def unfreezeGradient(self, n):
         for k in range(len(self.blocks)):
@@ -362,11 +412,28 @@ class convexGreedyNet(nn.Module):
     def unfreezeAll(self):
         for k in range(len(self.blocks)):
             for name, p in self.blocks[k].named_parameters():
-                if name.startswith('v'):
+                if name.startswith('aggregate') or name.startswith('decomp'):
                     p.requires_grad = True
 
     def nuclear_norm(self, n):
         return self.blocks[n].nuclear_norm()
+
+
+    def prepare_decomp(self, n):
+        self.blocks[n].prepare_decomposition()
+        for k in range(len(self.blocks)):
+            for p in self.blocks[k].parameters():
+                p.requires_grad = False
+                p.grad = None
+
+        for name, p in self.blocks[n].named_parameters():
+            if name.startswith('decomp'):
+                print(name)
+                p.requires_grad = True
+
+
+    def complete_decomp(self, n):
+        self.blocks[n].complete_decomposition()
 
     def hinge_loss(self, a, squared_hinge=False):
         x = a[0]
@@ -379,15 +446,21 @@ class convexGreedyNet(nn.Module):
                 out = self.blocks[n].constraint_violation(out, squared_hinge)
         return out
 
-    def forward(self, a, transformed_model=False):
+    def forward(self, a, transformed_model=False, decompose=False, store_activations=False):
         x = a[0]
         N = a[1]
         out = x
         for n in range(N + 1):
             if n < N:
-                out = self.blocks[n].forward_next_stage(out).detach()
+                if store_activations:
+                    out = self.blocks[n].rep.detach().contiguous()
+                else:
+                    out = self.blocks[n].forward_next_stage(out).detach()
             else:
-                out = self.blocks[n](out, transformed_model)
+                if not decompose:
+                    out = self.blocks[n](out, transformed_model, store_activations)
+                else:
+                    out = self.blocks[n].decompose_weights(out)
         return out
 
 if __name__ == '__main__':

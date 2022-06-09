@@ -95,6 +95,12 @@ parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10'
 parser.add_argument('--test_cifar101', action='store_true', 
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
+
+parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
+parser.add_argument('--lambd', default=1e-10, type=float, help='Lambda for cone decomposition')
+parser.add_argument('--decomp_epochs', default=5, type=int, help='Over how many epochs to compute cone decomposition')
+parser.add_argument('--decomp_lr', nargs='+', default=[0.1], type=float, help='LR to use for cone decomposition')
+
 args = parser.parse_args()
 opts = vars(args)
 
@@ -117,6 +123,10 @@ if len(args.lambda_hinge_loss) == 1:
     lambda_hinge_list = [args.lambda_hinge_loss[0]]*args.ncnn
 else:
     lambda_hinge_list = args.lambda_hinge_loss
+if len(args.decomp_lr) == 1:
+    decomp_lr_list = [args.decomp_lr[0]]*args.ncnn
+else:
+    decomp_lr_list = args.decomp_lr
 
 for i in range(args.ncnn):
     if wd_list[i] < 0:
@@ -337,6 +347,13 @@ if args.test_cifar101:
     X = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_data.npy'))
     y = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_labels.npy'))
     X = np.transpose(X, (0, 3, 1, 2))
+    mean = np.array([0.4914, 0.4822, 0.4465])
+    std = np.array([0.2023, 0.1994, 0.2010])
+
+    mean = np.expand_dims(mean, (0, 2, 3)) # 1 x 3 x 1 x 1
+    std = np.expand_dims(std, (0, 2, 3)) # 1 x 3 x 1 x 1
+
+    X = (X/255 - mean)/std
 
     testset = PrepareData(X, y)
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
@@ -364,7 +381,7 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes)
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
@@ -466,6 +483,59 @@ def train_classifier(epoch,n):
     acc = 100.*float(correct)/float(total)
     return acc, train_loss/(batch_idx+1)
 
+def compute_decomposition(n):
+    print('\nComputing cone decomposition for stage: %d' % n)
+    net.train()
+    with autocast():
+        if args.multi_gpu:
+            net.module.prepare_decomp(n)
+        else:
+            net.prepare_decomp(n)
+    to_train = list(filter(lambda p: p.requires_grad, net.parameters()))
+    if args.optimizer == 'SGD':
+        decomp_optimizer = optim.SGD(to_train, lr=decomp_lr_list[n], momentum=0.9)
+    elif args.optimizer == 'Adam':
+        decomp_optimizer = optim.AdamW(to_train, lr=decomp_lr_list[n])
+
+    decomp_scaler = GradScaler()
+    for k in range(n):
+        if args.multi_gpu:
+            net.module.blocks[k].eval()
+        else:
+            net.blocks[k].eval()
+
+
+    for epoch in range(args.decomp_epochs):
+        decomp_loss = 0
+
+        for batch_idx, (inputs, _) in enumerate(trainloader_classifier):
+            if use_cuda:
+                inputs = inputs.cuda()
+
+            decomp_optimizer.zero_grad()
+
+            with autocast():
+                loss = net.forward([inputs,n], decompose=True)
+
+                if torch.isnan(loss):
+                    print('nan loss!')
+                    sys.exit(-1)
+
+                decomp_loss += loss.item()
+
+            decomp_scaler.scale(loss).backward()
+            decomp_scaler.step(decomp_optimizer)
+            decomp_scaler.update()
+
+            progress_bar(batch_idx, len(trainloader_classifier), 'Decomp Loss: %.3f'
+                % (decomp_loss/(batch_idx+1)))
+
+    if args.multi_gpu:
+        net.module.complete_decomp(n)
+    else:
+        net.complete_decomp(n)
+
+    acc_decomp = test(0, n, ensemble=False)
 
 def check_stationarity(n):
     print('\nChecking stationarity for stage: %d' % n)
@@ -619,7 +689,7 @@ def test(epoch,n,ensemble=False):
                 total += targets.size(0)
                 correct += predicted.eq(targets.data).cpu().sum().item()
             
-            if args.ensemble:
+            if ensemble:
                 all_outs[n].append(outputs.data.cpu())
                 all_targs.append(targets.data.cpu())
 
@@ -638,7 +708,6 @@ def test(epoch,n,ensemble=False):
             #very lazy
             for i in range(n_start, n+1):
                 total_out += float(weight[i])*all_outs[i]
-
 
             _, predicted = torch.max(total_out, 1)
             correct = predicted.eq(all_targs).sum()
@@ -705,6 +774,10 @@ for n in range(n_start, n_cnn):
 
     if args.burer_monteiro and args.check_constraint:
         check_dual_qualification(n)
+
+    if args.decompose and n < n_cnn-1:
+        compute_decomposition(n)
+
     
     del to_train
     del optimizer
