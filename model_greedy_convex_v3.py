@@ -240,7 +240,9 @@ class custom_cvx_layer(torch.nn.Module):
                 if self.relu:
                     DX_Z = self.act(X_Z)
                 else:
-                    DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((x.shape[0], self.P, self.burer_dim, x.shape[-2], x.shape[-1]))
+                    DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((x.shape[0], self.P, -1, x.shape[-2], x.shape[-1]))
+                    if not self.burer_monteiro:
+                        DX_Z = DX_Z.sum(1)
                     DX_Z = DX_Z.reshape((x.shape[0], -1, x.shape[-2], x.shape[-1]))
                     if self.nonneg_aggregate:
                         DX_Z = torch.cat((F.relu(DX_Z), F.relu(-DX_Z)), dim=1)
