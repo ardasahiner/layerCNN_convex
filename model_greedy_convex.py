@@ -169,7 +169,6 @@ class custom_cvx_layer(torch.nn.Module):
                 u, s, v = torch.svd(aggregate_v)
                 #aggregate_v = torch.squeeze(u[:, :, 0] *s[:, 0].unsqueeze(1))
                 aggregate_v = torch.squeeze(u[:, :, 0]* torch.sqrt(s[:, 0]).unsqueeze(1))
-                print(s[:, 0])
                 self.aggregate_v.data = aggregate_v.reshape((self.P*self.k_eff*self.k_eff, -1, self.kernel_size, self.kernel_size))
                 if self.bias:
                     aggregate_v_bias = torch.norm(self.v_bias.reshape((self.k_eff*self.k_eff, self.num_classes, self.P, -1)), dim=1, keepdim=False)

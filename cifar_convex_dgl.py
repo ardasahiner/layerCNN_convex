@@ -33,7 +33,7 @@ parser.add_argument('--lr', nargs='+', default=[0.1], type=float, help='learning
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 parser.add_argument('--ncnn',  default=5,type=int, help='depth of the CNN')
 parser.add_argument('--nepochs',  default=50,type=int, help='number of epochs')
-parser.add_argument('--epochdecay',  default=15,type=int, help='number of epochs')
+parser.add_argument('--epochdecay',  nargs='+', default=[15],type=int, help='number of epochs')
 parser.add_argument('--avg_size',  default=16,type=int, help='size of averaging ')
 parser.add_argument('--feature_size',  default=256,type=int, help='feature size')
 parser.add_argument('--ds-type', default=None, help="type of downsampling. Defaults to old block_conv with psi. Options 'psi', 'stride', 'avgpool', 'maxpool'")
@@ -115,6 +115,10 @@ if len(args.lr) == 1:
     lr_list = [args.lr[0]]*args.ncnn
 else:
     lr_list = args.lr
+if len(args.epochdecay) == 1:
+    decay_list = [args.epochdecay[0]]*args.ncnn
+else:
+    decay_list = args.epochdecay
 if len(args.wd) == 1:
     wd_list = [args.wd[0]]*args.ncnn
 else:
@@ -465,7 +469,7 @@ for n in range(n_start, n_cnn):
     elif args.optimizer == 'Adam':
         layer_optim[n] = optim.AdamW(to_train, lr=lr, weight_decay=wd_list[n])
 
-    layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], args.epochdecay, 0.2, verbose=True)
+    layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], decay_list[n], 0.2, verbose=True)
 
 scaler = GradScaler()
 
