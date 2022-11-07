@@ -106,8 +106,8 @@ class custom_cvx_layer(torch.nn.Module):
             V_reshaped = dummy_fc.weight.data.t().reshape((self.P, -1, self.a, self.num_classes)).reshape((self.P, -1, self.a*self.num_classes)) # P x m x ac
             Z_eff = U_reshaped @ V_reshaped
             Z_eff_conv = Z_eff.permute(0, 2, 1).reshape((-1, self.in_planes//self.groups, self.kernel_size, self.kernel_size))
-            self.linear_operator = nn.Conv2d(in_planes, planes*num_classes*self.a, 
-                    kernel_size=kernel_size, padding=self.padding, bias=bias, groups=self.groups)
+            self.linear_operator = nn.Conv2d(in_planes*self.a, planes*num_classes*self.a, 
+                    kernel_size=kernel_size, padding=0, bias=bias, groups=self.groups*self.a)
             
             self.linear_operator.weight.data = Z_eff_conv
 
@@ -167,28 +167,53 @@ class custom_cvx_layer(torch.nn.Module):
             pred_transformed = (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)
             return pred_transformed
         else:
-            X_Z = self.linear_operator(x) # N x P*m x h x w
-            if self.relu:
-                DX_Z = self.act(X_Z)
-            else:
-                DX_Z = torch.einsum('nphw, npmhw -> nmhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
-            if store_activations:
-                # N x ac x H x W
-                self.rep = DX_Z.detach()
-#            if store_activations:
-#                with torch.no_grad():
-#                    # N x Pac x H x W
-#                    self.rep = X_Z.detach().reshape((N, self.P, -1, H, W)) * sign_patterns.float().unsqueeze(2)
-#                    self.rep = self.rep.reshape((N, -1, H, W))
-#                    self.rep = self.downsample_rep(self.rep) # N x Pa x a x avg_size x avg_size
-#                    self.rep = self.rep.reshape((N, -1, self.a, self.a, self.avg_size, self.avg_size))
-#                    self.rep = torch.diagonal(self.rep, dim1=2, dim2=3).permute(0, 1, 4, 2, 3)
-#                    self.rep = self.rep.reshape((N, -1, self.k_eff, self.k_eff, self.avg_size, self.avg_size)).permute(0, 1, 2, 4, 3, 5)
-#                    self.rep = self.rep.reshape((N, -1, H, W))
+            with torch.no_grad():
+                x = self.reshape_data_for_groups(x, self.kernel_size, self.padding)
 
-            DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
-            DX_Z = DX_Z.reshape((N, self.a, self.num_classes, self.a))
-            return (torch.einsum('naca -> nc', DX_Z) + self.bias_operator)
+            X_Z = self.linear_operator(x) # N x P*m x h x w
+            N, C, H, W = X_Z.shape
+            
+            if self.relu:
+                DX_Z = self.act(X_Z).reshape((N, self.a*self.P, -1, H, W))
+            else:
+                sp = self.reshape_data_for_groups(sign_patterns.float(), 1, 0)
+                DX_Z = torch.einsum('nphw, npmhw -> npmhw', sp, X_Z.reshape((N, self.a*self.P, -1, H, W)))
+
+            if store_activations:
+                with torch.no_grad():
+                    rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H, W)).reshape((N, self.a, -1, H, W)).permute(0, 2, 1, 3, 4)
+                    rep = self.downsample_rep.inverse(rep)
+                    self.rep = rep
+
+            DX_Z = DX_Z.sum(1)
+            DX_Z = self.post_pooling(DX_Z).squeeze(2).squeeze(2) # n x c
+            return DX_Z + self.bias_operator
+
+
+            #X_Z = self.linear_operator(x) # N x P*m x h x w
+            #if self.relu:
+            #    DX_Z = self.act(X_Z)
+            #else:
+            #    DX_Z = torch.einsum('nphw, npmhw -> nmhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
+            #if store_activations:
+            #    # N x ac x H x W
+            #    self.rep = DX_Z.detach()
+
+            #DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
+            #DX_Z = DX_Z.reshape((N, self.a, self.num_classes, self.a))
+            #return (torch.einsum('naca -> nc', DX_Z) + self.bias_operator)
+
+    def reshape_data_for_groups(self, x, kernel_size, padding):
+        x_padded = torch.nn.functional.pad(x, (padding, padding, padding, padding))
+        N, C, H, W = x.shape
+        new_H = kernel_size + H // self.k_eff - 1
+        new_W = kernel_size + W // self.k_eff - 1
+        x_unf = torch.nn.functional.unfold(x_padded, kernel_size=(new_H, new_W), padding=0, stride=(new_H-kernel_size+1, new_W-kernel_size+1)) # N x c*newH*newW x k_eff*k_eff
+        x_unf = x_unf.reshape((N, C, -1, self.k_eff*self.k_eff))
+        x_unf = x_unf.permute(0, 3, 1, 2).reshape((N, C*self.k_eff*self.k_eff, -1)) # N x c*k_eff*k_eff x new_h*newW
+        x_fold = torch.nn.functional.fold(x_unf, output_size=(new_H, new_W), kernel_size=1, padding=0) # N x ac x newH x newW
+
+        return x_fold
     
     def generate_Z(self, x=None):
         if not self.burer_monteiro:
@@ -383,7 +408,8 @@ class convexGreedyNet(nn.Module):
                 if burer_monteiro:
                     pre_factor *= burer_dim
                 else:
-                    in_planes = (in_size//avg_size)*(in_size//avg_size)*num_classes
+                    in_planes = in_planes*num_classes
+    #                in_planes = (in_size//avg_size)*(in_size//avg_size)*num_classes
     #                groups = in_planes
     #            else:
     #                groups=num_classes
@@ -399,7 +425,7 @@ class convexGreedyNet(nn.Module):
                 avg_size = avg_size // 2
                 in_size = in_size // 2
                 #if n > 2 or (burer_monteiro and burer_dim < 4):
-                next_in_planes = next_in_planes * 2
+                #next_in_planes = next_in_planes * 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,

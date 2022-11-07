@@ -47,8 +47,6 @@ parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
                     help='number of data loading workers (default: 6)')
 parser.add_argument('--down', default='[2, 3]', type=str,
                         help='layer at which to downsample')
-
-
 parser.add_argument('--sparsity', default=0.5, type=float,
                         help='sparsity of hyperplane generating arrangements')
 parser.add_argument('--signs_sgd', action='store_true', help='Whether to initialize sign patterns from SGD')
