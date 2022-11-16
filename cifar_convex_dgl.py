@@ -93,6 +93,8 @@ parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10'
 parser.add_argument('--test_cifar101', action='store_true', 
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
+parser.add_argument('--one_vs_all', action='store_true', help='Whether to ensemble num_classes one_vs_all models')
+
 
 parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
 parser.add_argument('--lambd', default=1e-10, type=float, help='Lambda for cone decomposition')
@@ -276,12 +278,21 @@ if args.signs_sgd:
             elif 'bias' in name:
                 sign_pattern_bias.append(param)
 
-net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
-                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
-                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
-    
+
+if args.one_vs_all:
+    net = oneVsAllGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
+                          downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
+                          nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
+                          burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
+                          sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
+else:
+    net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
+                          downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
+                          nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
+                          burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
+                          sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
+
+
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)
 
@@ -304,21 +315,6 @@ else:
 def train_classifier(epoch):
     print('\nSubepoch: %d' % epoch)
     net.train()
-    
-    if args.debug_parameters:
-    #This is used to verify that early layers arent updated
-        import copy
-        #store all parameters on cpu as numpy array
-        net_cpu = copy.deepcopy(net).cpu()
-        if args.multi_gpu:
-            net_cpu.module.state_dict()
-        else:
-            net_cpu_dict = net_cpu.state_dict()
-        with open(debug_log_txt, "a") as text_file:
-            print('n: %d'%n)
-            for param in net_cpu_dict.keys():
-                net_cpu_dict[param]=net_cpu_dict[param].numpy()
-                print("parameter stored on cpu as numpy: %s  "%(param),file=text_file)
 
     train_loss = [0]*ncnn
     correct = [0]*ncnn
@@ -335,11 +331,10 @@ def train_classifier(epoch):
         for n in range(ncnn):
             # Forward
             layer_optim[n].zero_grad()
-            
             with autocast():
                 outputs = net([inputs, n], store_activations=True)
-                targets_loss = targets_loss.to(outputs.device)
-                loss = criterion_classifier(outputs, targets_loss)
+                targets_loss_curr = targets_loss.to(outputs.device)
+                loss = criterion_classifier(outputs, targets_loss_curr)
 
             scaler.scale(loss).backward()
             scaler.step(layer_optim[n])
@@ -362,7 +357,7 @@ def train_classifier(epoch):
                 .format(np.array(train_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
 
     acc = 100.*float(correct[-1])/float(total[-1])
-    return acc, train_loss[-1]/(batch_idx+1)
+    return acc, [t/(batch_idx+1) for t in train_loss]
 
 
 n_start = 0
@@ -399,24 +394,19 @@ def test(epoch,ensemble=False):
 
             for n in range(ncnn):
                 # Forward
-                layer_optim[n].zero_grad()
-                
+
                 with autocast():
                     outputs = net([inputs, n], store_activations=True)
-                    targets_loss = targets_loss.to(outputs.device)
-                    loss = criterion_classifier(outputs, targets_loss)
-            
+                    targets_loss_curr = targets_loss.to(outputs.device)
+                    loss = criterion_classifier(outputs, targets_loss_curr)
+
                 if ensemble:
-                    all_outs[n].append(outputs.data.cpu())
+                    all_outs[n].append(outputs.detach().data.cpu())
                     if n == 0:
                         all_targs.append(targets.data.cpu())
 
                 # measure accuracy and record loss
                 test_loss[n] += loss.item()
-
-                if not math.isfinite(loss.item()):
-                    print("Loss is {}, stopping training".format(loss.item()))
-                    sys.exit(1)
                 
                 _, predicted = torch.max(outputs.detach().data, 1)
                 total[n] += targets.size(0)
@@ -461,13 +451,15 @@ for n in range(n_start, n_cnn):
         to_train = list(filter(lambda p: p.requires_grad, net.module.blocks[n].parameters()))
     else:
         to_train = list(filter(lambda p: p.requires_grad, net.blocks[n].parameters()))
+
     lr = lr_list[n]
     if args.optimizer == 'SGD':
         layer_optim[n] = optim.SGD(to_train, lr=lr, momentum=0.9, weight_decay=wd_list[n])
     elif args.optimizer == 'Adam':
         layer_optim[n] = optim.AdamW(to_train, lr=lr, weight_decay=wd_list[n])
 
-    layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], decay_list[n], 0.2, verbose=True)
+    #layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], decay_list[n], 0.2, verbose=True)
+    layer_scheduler[n] = optim.lr_scheduler.ReduceLROnPlateau(layer_optim[n], factor=0.2, patience=2, verbose=True)
 
 scaler = GradScaler()
 
@@ -478,28 +470,39 @@ for epoch in range(0, num_ep):
 
         with open(name_log_txt, "a") as text_file:
             print("epoch {}, train loss {}, train {}, test {},ense {} "
-                  .format(epoch,loss_train,acc_train,acc_test,acc_test_ensemble), file=text_file)
+                  .format(epoch,loss_train[-1],acc_train,acc_test,acc_test_ensemble), file=text_file)
     else:
         acc_test = test(epoch)
         with open(name_log_txt, "a") as text_file:
-            print("epoch {}, train loss {}, train {}, test {}, ".format(epoch,loss_train,acc_train,acc_test), file=text_file)
+            print("epoch {}, train loss {}, train {}, test {}, ".format(epoch,loss_train[-1],acc_train,acc_test), file=text_file)
 
     if args.debug:
         break
 
     for n in range(ncnn):
-        layer_scheduler[n].step()
+        for i, param_group in enumerate(layer_optim[n].param_groups):
+            old_lr = float(param_group['lr'])
+            break
+        layer_scheduler[n].step(loss_train[n])
+        for i, param_group in enumerate(layer_optim[n].param_groups):
+            new_lr = float(param_group['lr'])
+        
+        # if an upstream lr changes, don't change any other LRs yet.
+        if new_lr != old_lr:
+            print(n, 'lr changed')
+            break
 
-    if args.save_checkpoint:
-        curr_sv_model = name_save_model + '_' + str(n) + '.pt'
-        print('saving checkpoint')
-        if args.multi_gpu:
-            torch.save({
-                    'model_state_dict': net.module.state_dict(),
-                    }, curr_sv_model)
-        else:
-            torch.save({
-                    'model_state_dict': net.state_dict(),
-                    }, curr_sv_model)
+
+        if args.save_checkpoint and epoch == num_ep - 1:
+            curr_sv_model = name_save_model + '_' + str(n) + '_' + str(i) + '.pt'
+            print('saving checkpoint')
+            if args.multi_gpu:
+                torch.save({
+                        'model_state_dict': net.module.state_dict(),
+                        }, curr_sv_model)
+            else:
+                torch.save({
+                        'model_state_dict': net.state_dict(),
+                        }, curr_sv_model)
 
 

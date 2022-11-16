@@ -26,10 +26,100 @@ def generate_sign_patterns(P, kernel, k_eff, n_channels=3, sparsity=None):
     
     return umat, biasmat
 
+class SignPatternGenerator(torch.nn.Module):
+    """
+        Generates sign patterns for a convex NN module. n is the number of hidden layers in the network,
+        i.e. the number of linear hyperplanes which are used to segment the data in conjunction with each other.
+    """
+    def __init__(self,
+                 in_planes,
+                 planes,
+                 kernel_size,
+                 padding,
+                 bias,
+                 n=3,
+                 two_sided=False,
+                 tiered=True,
+                 use_bn=True,
+                 bn_before_layer=True,
+                 previous_layer_weights=[],
+                 previous_layer_biases=[],
+        ):
+        """
+            two_sided: bool which determines whether one should use the positive and
+            negative side of each hyperplane, or just the positive side. The default
+            previous approach was to use two-sided=False.
+            tiered: bool which determines whether sign patterns for the next hidden layer
+            should depend on the hidden activations of the previous layer, or just be linear
+            hyperplanes.
+        """
+        super(SignPatternGenerator, self).__init__()
+        self.planes = planes
+        self.tiered = tiered
+
+        if self.tiered:
+            self.layer_n_generators = []
+            curr_in_planes = in_planes
+            for layer in range(n):
+
+
+                curr_layer = [nn.Conv2d(curr_in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias)]
+                if len(previous_layer_weights) > layer:
+                    curr_layer[0].weight.data = previous_layer_weights[layer]
+                    curr_layer[0].bias.data = previous_layer_biases[layer]
+                if use_bn:
+                    if bn_before_layer:
+                        curr_layer = [nn.BatchNorm2d(curr_in_planes, affine=False)] + curr_layer
+                    else:
+                        curr_layer += [nn.BatchNorm2d(planes, affine=False)]
+
+                curr_layer = nn.Sequential(*curr_layer)
+                self.layer_n_generators.append(curr_layer)
+                curr_in_planes = planes
+            self.layer_n_generators = nn.ModuleList(self.layer_n_generators)
+        else:
+            self.layer_n_generators = nn.Conv2d(in_planes, n*planes, kernel_size=kernel_size, padding=padding, bias=bias)
+
+        self.n = n
+        self.two_sided = two_sided
+        if self.two_sided:
+            self.num_patterns = int(2**n)
+        else:
+            self.num_patterns = 1
+
+
+    def forward(self, x):
+        if self.tiered:
+            layer_n_outputs = []
+            for layer in range(self.n):
+                x = self.layer_n_generators[layer](x)
+                layer_n_outputs.append(x)
+                x = torch.nn.functional.relu(x)
+            layer_n_outputs = torch.cat(layer_n_outputs, dim=1)
+        else:
+            layer_n_outputs = self.layer_n_generators(x)
+        patterns_all = []
+
+        for i in range(self.n):
+            curr_len = len(patterns_all)
+            if  curr_len == 0:
+                patterns_all = [
+                    layer_n_outputs[:, (i)*self.planes:(i+1)*self.planes] >= 0,
+                ]
+                if self.two_sided:
+                    patterns_all.append(layer_n_outputs[:, (i)*self.planes:(i+1)*self.planes] < 0)
+
+            else:
+                patterns_all.extend([(layer_n_outputs[:, (i)*self.planes:(i+1)*self.planes] >= 0)*patterns_all[j] for j in range(curr_len)])
+                if self.two_sided:
+                    patterns_all.extend([(layer_n_outputs[:, (i)*self.planes:(i+1)*self.planes] < 0)*patterns_all[j] for j in range(curr_len)])
+
+        return torch.cat(patterns_all[-self.num_patterns:], dim=1)
+
 class custom_cvx_layer(torch.nn.Module):
     def __init__(self, in_planes, planes, in_size=32,
                  kernel_size=3, padding=1, avg_size=16, num_classes=10,
-                 bias=False, downsample=False, sparsity=None, feat_aggregate='random',
+                 bias=True, downsample=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, burer_monteiro=False, burer_dim=1,
                  sp_weight=None, sp_bias=None, relu=False, lambd=1e-10, groups=1):
         super(custom_cvx_layer, self).__init__()
@@ -69,27 +159,10 @@ class custom_cvx_layer(torch.nn.Module):
         self.relu = relu
 
         if not self.relu:
-            self.sign_pattern_generator = nn.Conv2d(in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias)
-            
-            if sp_weight is not None:
-                u_vectors, bias_vectors = sp_weight, sp_bias
-                if self.nonneg_aggregate and in_planes != 3:
-                    self.sign_pattern_generator.weight.data = torch.cat((u_vectors, u_vectors), 1)
-                else:
-                    self.sign_pattern_generator.weight.data = u_vectors
-                if bias:
-                    if self.nonneg_aggregate and in_planes != 3:
-                        self.sign_pattern_generator.bias.data = torch.cat((bias_vectors, bias_vectors), 1)
-                    else:
-                        self.sign_pattern_generator.bias.data = bias_vectors
-    #        else:
-    #            u_vectors, bias_vectors = generate_sign_patterns(planes, kernel_size, 
-    #                                    self.k_eff, in_planes, sparsity)
-            
-            self.sign_pattern_generator.weight.requires_grad = False
-            if bias:
-                self.sign_pattern_generator.bias.requires_grad = False
-        
+            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias)
+            for param in self.sign_pattern_generator.parameters():
+                param.requires_grad = False
+
         self.act = nn.ReLU()
 
         if self.burer_monteiro:
@@ -267,30 +340,26 @@ class custom_cvx_layer(torch.nn.Module):
     def forward_next_stage(self, x):
         # pre-compute sign patterns and downsampling before computational graph necessary
         with torch.no_grad():
-            if not self.aggregated:
-                self._aggregate_weights()
             if self.downsample:
                 x = self.down(x)
-            if not self.relu and not self.decomposed:
+
+            if not self.relu:
                 sign_patterns = self.sign_pattern_generator(x) > 0 # N x P x h x w
 
-            if not self.decomposed:
-                X_Z = self.aggregate_conv(x) # N x P*m x h x w
-
-                if self.relu:
-                    DX_Z = self.act(X_Z)
-                else:
-                    DX_Z = sign_patterns.unsqueeze(2) * X_Z.reshape((x.shape[0], self.P, -1, x.shape[-2], x.shape[-1]))
-                    if not self.burer_monteiro:
-                        DX_Z = DX_Z.sum(1)
-                    DX_Z = DX_Z.reshape((x.shape[0], -1, x.shape[-2], x.shape[-1]))
-                    if self.nonneg_aggregate:
-                        DX_Z = torch.cat((F.relu(DX_Z), F.relu(-DX_Z)), dim=1)
+            x = self.reshape_data_for_groups(x, self.kernel_size, self.padding)
+            X_Z = self.linear_operator(x) # N x P*m x h x w
+            N, C, H, W = X_Z.shape
+            
+            if self.relu:
+                DX_Z = self.act(X_Z).reshape((N, self.a*self.P, -1, H, W))
             else:
-                X_Z = self.decomposed_conv(x)
-                DX_Z = self.act(X_Z)
+                sp = self.reshape_data_for_groups(sign_patterns.float(), 1, 0)
+                DX_Z = torch.einsum('nphw, npmhw -> npmhw', sp, X_Z.reshape((N, self.a*self.P, -1, H, W)))
 
-        return DX_Z.detach()
+            rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H, W)).reshape((N, self.a, -1, H, W)).permute(0, 2, 1, 3, 4)
+            rep = self.downsample_rep.inverse(rep)
+
+        return rep
     
     def nuclear_norm(self):
         weights_reshaped = self.generate_Z()
@@ -412,7 +481,7 @@ class convexGreedyNet(nn.Module):
     #                in_planes = (in_size//avg_size)*(in_size//avg_size)*num_classes
     #                groups = in_planes
     #            else:
-    #                groups=num_classes
+                    groups=num_classes
     #                in_planes = in_planes*num_classes
                 if nonneg_aggregate:
                     pre_factor *= 2
@@ -425,15 +494,15 @@ class convexGreedyNet(nn.Module):
                 avg_size = avg_size // 2
                 in_size = in_size // 2
                 #if n > 2 or (burer_monteiro and burer_dim < 4):
-                #next_in_planes = next_in_planes * 2
+                next_in_planes = next_in_planes * 2
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
-                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
+                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups))
             else:
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
-                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias= n < 1, 
+                                         padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups))
@@ -511,6 +580,31 @@ class convexGreedyNet(nn.Module):
                 else:
                     out = self.blocks[n].decompose_weights(out)
         return out
+
+class oneVsAllGreedyNet(nn.Module):
+    def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
+                 in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
+                 nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
+                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
+                 lambd=1e-10):
+        super(oneVsAllGreedyNet, self).__init__()
+        self.num_classes = num_classes
+
+        self.sub_nets = [convexGreedyNet(block, num_blocks, feature_size, avg_size,
+                                        1, in_size, downsample, batchnorm,
+                                        sparsity, feat_aggregate, nonneg_aggregate, kernel_size,
+                                        burer_monteiro, burer_dim, sign_pattern_weights, sign_pattern_bias,
+                                        relu, in_planes, decompose, lambd) for i in range(num_classes)]
+        self.sub_nets = nn.ModuleList(self.sub_nets)
+        self.blocks = nn.ModuleList([nn.ModuleList([self.sub_nets[i].blocks[j] for i in range(num_classes)]) for j in range(num_blocks)])
+        print(len(self.blocks))
+
+    def forward(self, a, transformed_model=False, decompose=False, store_activations=False):
+        outputs_all = torch.zeros((len(a[0]), self.num_classes)).to(a[0].device).float()
+        for i in range(self.num_classes):
+            outputs_all[:, i] = self.sub_nets[i].forward(a, transformed_model=transformed_model, decompose=decompose, store_activations=store_activations).squeeze()
+
+        return outputs_all
 
 if __name__ == '__main__':
     torch.manual_seed(9)
