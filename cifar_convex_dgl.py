@@ -94,6 +94,7 @@ parser.add_argument('--test_cifar101', action='store_true',
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
 parser.add_argument('--one_vs_all', action='store_true', help='Whether to ensemble num_classes one_vs_all models')
+parser.add_argument('--pattern_depth', default=1, type=int, help='Depth of sign patterns')
 
 
 parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
@@ -279,18 +280,12 @@ if args.signs_sgd:
                 sign_pattern_bias.append(param)
 
 
-if args.one_vs_all:
-    net = oneVsAllGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
-                          downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                          nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
-                          burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                          sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
-else:
-    net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
-                          downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                          nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
-                          burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                          sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
+net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
+                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
+                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
+                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
+                      pattern_depth=args.pattern_depth)
 
 
 with open(name_log_txt, "a") as text_file:

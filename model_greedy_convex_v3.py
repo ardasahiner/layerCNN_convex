@@ -37,7 +37,7 @@ class SignPatternGenerator(torch.nn.Module):
                  kernel_size,
                  padding,
                  bias,
-                 n=3,
+                 n=1,
                  two_sided=False,
                  tiered=True,
                  use_bn=True,
@@ -121,7 +121,8 @@ class custom_cvx_layer(torch.nn.Module):
                  kernel_size=3, padding=1, avg_size=16, num_classes=10,
                  bias=True, downsample=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, burer_monteiro=False, burer_dim=1,
-                 sp_weight=None, sp_bias=None, relu=False, lambd=1e-10, groups=1):
+                 sp_weight=None, sp_bias=None, relu=False, lambd=1e-10, groups=1,
+                 pattern_depth=1):
         super(custom_cvx_layer, self).__init__()
 
         self.P = planes
@@ -159,7 +160,7 @@ class custom_cvx_layer(torch.nn.Module):
         self.relu = relu
 
         if not self.relu:
-            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias)
+            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias, n=pattern_depth)
             for param in self.sign_pattern_generator.parameters():
                 param.requires_grad = False
 
@@ -454,7 +455,7 @@ class convexGreedyNet(nn.Module):
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
                  sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
-                 lambd=1e-10):
+                 lambd=1e-10, pattern_depth=1):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -499,13 +500,15 @@ class convexGreedyNet(nn.Module):
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
-                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups))
+                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups, 
+                                         pattern_depth=pattern_depth))
             else:
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
-                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups))
+                                         burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups,
+                                         pattern_depth=pattern_depth))
     
             print(n)
             print(pre_factor*in_planes, next_in_planes)
@@ -580,31 +583,6 @@ class convexGreedyNet(nn.Module):
                 else:
                     out = self.blocks[n].decompose_weights(out)
         return out
-
-class oneVsAllGreedyNet(nn.Module):
-    def __init__(self, block, num_blocks, feature_size=256, avg_size=16, num_classes=10, 
-                 in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
-                 nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
-                 sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
-                 lambd=1e-10):
-        super(oneVsAllGreedyNet, self).__init__()
-        self.num_classes = num_classes
-
-        self.sub_nets = [convexGreedyNet(block, num_blocks, feature_size, avg_size,
-                                        1, in_size, downsample, batchnorm,
-                                        sparsity, feat_aggregate, nonneg_aggregate, kernel_size,
-                                        burer_monteiro, burer_dim, sign_pattern_weights, sign_pattern_bias,
-                                        relu, in_planes, decompose, lambd) for i in range(num_classes)]
-        self.sub_nets = nn.ModuleList(self.sub_nets)
-        self.blocks = nn.ModuleList([nn.ModuleList([self.sub_nets[i].blocks[j] for i in range(num_classes)]) for j in range(num_blocks)])
-        print(len(self.blocks))
-
-    def forward(self, a, transformed_model=False, decompose=False, store_activations=False):
-        outputs_all = torch.zeros((len(a[0]), self.num_classes)).to(a[0].device).float()
-        for i in range(self.num_classes):
-            outputs_all[:, i] = self.sub_nets[i].forward(a, transformed_model=transformed_model, decompose=decompose, store_activations=store_activations).squeeze()
-
-        return outputs_all
 
 if __name__ == '__main__':
     torch.manual_seed(9)
