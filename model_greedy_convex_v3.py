@@ -8,24 +8,6 @@ import numpy as np
 import math
 import sys
 
-def generate_sign_patterns(P, kernel, k_eff, n_channels=3, sparsity=None): 
-    # generate sign patterns
-    umat = np.random.normal(0, 1, (P, n_channels, kernel, kernel))
-    
-    if sparsity is not None:
-        umat_fft = dct(dct(umat, axis=2), axis=3)
-        mask = np.random.choice([1, 0], size=(P, n_channels, kernel, kernel), p=[sparsity, 1-sparsity])
-
-        # make each mask sparsity sparse, try to eliminate non-zero masks
-        mask = [m if np.linalg.norm(m) > 0 else np.random.choice([1, 0], size=(n_channels, kernel, kernel), p=[sparsity, 1-sparsity]) for m in mask]
-        umat = idct(idct(umat * mask, axis=2), axis=3)
-    
-    umat = torch.from_numpy(umat).float()
-    umat /= kernel**2
-    biasmat = torch.from_numpy(np.random.normal(0, torch.mean(torch.std(umat, (2, 3))), (P))).float()
-    
-    return umat, biasmat
-
 class SignPatternGenerator(torch.nn.Module):
     """
         Generates sign patterns for a convex NN module. n is the number of hidden layers in the network,

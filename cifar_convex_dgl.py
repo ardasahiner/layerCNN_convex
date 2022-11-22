@@ -65,7 +65,7 @@ parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
-parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
+parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
 parser.add_argument('--reset_momentum', action='store_true', help='Whether to reset the momentum parameter every epochdecay epochs')
 
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
@@ -298,7 +298,6 @@ if args.multi_gpu:
     net = torch.nn.DataParallel(net).cuda()
 net = net.cuda()
 cudnn.benchmark = True
-torch.backends.cudnn.deterministic = False
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
@@ -453,8 +452,8 @@ for n in range(n_start, n_cnn):
     elif args.optimizer == 'Adam':
         layer_optim[n] = optim.AdamW(to_train, lr=lr, weight_decay=wd_list[n])
 
-    #layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], decay_list[n], 0.2, verbose=True)
-    layer_scheduler[n] = optim.lr_scheduler.ReduceLROnPlateau(layer_optim[n], factor=0.2, patience=2, verbose=True)
+    layer_scheduler[n] = optim.lr_scheduler.StepLR(layer_optim[n], decay_list[n], 0.2, verbose=True)
+    #layer_scheduler[n] = optim.lr_scheduler.ReduceLROnPlateau(layer_optim[n], factor=0.2, patience=2, verbose=True)
 
 scaler = GradScaler()
 
@@ -478,7 +477,7 @@ for epoch in range(0, num_ep):
         for i, param_group in enumerate(layer_optim[n].param_groups):
             old_lr = float(param_group['lr'])
             break
-        layer_scheduler[n].step(loss_train[n])
+        layer_scheduler[n].step()
         for i, param_group in enumerate(layer_optim[n].param_groups):
             new_lr = float(param_group['lr'])
         
