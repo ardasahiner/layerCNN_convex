@@ -9,6 +9,8 @@ import numpy as np
 import gc
 import sys
 
+import torchaudio
+from torchaudio.datasets import SPEECHCOMMANDS
 import torchvision
 import torchvision.transforms as transforms
 from torch.cuda.amp import GradScaler, autocast
@@ -88,14 +90,14 @@ parser.add_argument('--check_constraint', action='store_true', help='Whether to 
 parser.add_argument('--check_stationary', action='store_true', help='Whether to check stationarity of convolutional weights')
 
 parser.add_argument('--ffcv', action='store_true', help='Whether to use FFCV loaders')
-parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST', 'IMNET'],
+parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10', 'FMNIST', 'IMNET', 'SPEECH'],
                     type=str, help='Dataset name')
+parser.add_argument('--dimensions', default=2, type=int, help='Number of dimensions of the convolution')
 parser.add_argument('--test_cifar101', action='store_true', 
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
 parser.add_argument('--one_vs_all', action='store_true', help='Whether to ensemble num_classes one_vs_all models')
 parser.add_argument('--pattern_depth', default=1, type=int, help='Depth of sign patterns')
-
 
 parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
 parser.add_argument('--lambd', default=1e-10, type=float, help='Lambda for cone decomposition')
@@ -184,8 +186,10 @@ if args.data_set == 'CIFAR10' or args.data_set == 'STL10' or args.data_set == 'F
     num_classes = 10
 elif args.data_set == 'IMNET':
     num_classes = 1000
+elif args.data_set == 'SPEECH':
+    num_classes = 35
 else:
-    assert False, "dataset name not in CIFAR10, STL10, FMNIST, IMNET"
+    assert False, "dataset name not in CIFAR10, STL10, FMNIST, IMNET, SPEECH"
 
 print('not using ffcv')
 
@@ -239,11 +243,90 @@ elif args.data_set == 'FMNIST':
     trainset_class = torchvision.datasets.FashionMNIST(root=args.data_dir, train=True, download=True,transform=transform)
     testset = torchvision.datasets.FashionMNIST(root=args.data_dir, train=False, download=True, transform=transform)
 
+elif args.data_set == 'SPEECH':
+    in_planes = 1
+
+    class SubsetSC(SPEECHCOMMANDS):
+        def __init__(self, subset: str = None):
+            super().__init__(args.data_dir, download=True)
+
+            def load_list(filename):
+                filepath = os.path.join(self._path, filename)
+                with open(filepath) as fileobj:
+                    return [os.path.normpath(os.path.join(self._path, line.strip())) for line in fileobj]
+
+            if subset == "validation":
+                self._walker = load_list("validation_list.txt")
+            elif subset == "testing":
+                self._walker = load_list("testing_list.txt")
+            elif subset == "training":
+                excludes = load_list("validation_list.txt") + load_list("testing_list.txt")
+                excludes = set(excludes)
+                self._walker = [w for w in self._walker if w not in excludes]
+
+    trainset_class = SubsetSC("training")
+    testset = SubsetSC("testing")
+    labels = sorted(list(set(datapoint[2] for datapoint in testset)))
+    print(len(labels))
+    def label_to_index(word):
+        # Return the position of the word in labels
+        return torch.tensor(labels.index(word))
+
+
+    def index_to_label(index):
+        # Return the word corresponding to the index in labels
+        # This is the inverse of label_to_index
+        return labels[index]
+
+    def pad_sequence(batch):
+        # Make all tensor in a batch the same length by padding with zeros
+        batch = [item.t() for item in batch]
+        batch = torch.nn.utils.rnn.pad_sequence(batch, batch_first=True, padding_value=0.)
+        return batch.permute(0, 2, 1)
+
+
+    def collate_fn(batch):
+
+        # A data tuple has the form:
+        # waveform, sample_rate, label, speaker_id, utterance_number
+
+        tensors, targets = [], []
+
+        # Gather in lists, and encode labels as indices
+        for waveform, _, label, *_ in batch:
+            tensors += [waveform]
+            targets += [label_to_index(label)]
+
+        # Group the list of tensors into a batched tensor
+        tensors = pad_sequence(tensors)
+        targets = torch.stack(targets)
+
+        return tensors, targets
+
+    trainloader_classifier = torch.utils.data.DataLoader(
+        trainset_class,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+    testloader = torch.utils.data.DataLoader(
+        testset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=collate_fn,
+        num_workers=2,
+        pin_memory=True,
+    )
+
 else:
     assert False, 'Something with dataset went wrong'
 
-trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+if args.data_set != 'SPEECH':
+    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
 if args.test_cifar101:
     X = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_data.npy'))
@@ -285,7 +368,7 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
                       sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
-                      pattern_depth=args.pattern_depth)
+                      pattern_depth=args.pattern_depth, dimensions=args.dimensions)
 
 
 with open(name_log_txt, "a") as text_file:
@@ -420,7 +503,7 @@ def test(epoch,ensemble=False):
                 all_outs[n] = torch.cat(all_outs[n])
                 #This is all on cpu so we dont care
                 weight = 2 ** (np.arange(n + 1)) / sum(2 ** np.arange(n + 1))
-                total_out = torch.zeros((total[-1],10))
+                total_out = torch.zeros((total[-1],num_classes))
 
                 #very lazy
                 for i in range(n_start, n+1):
@@ -482,9 +565,9 @@ for epoch in range(0, num_ep):
             new_lr = float(param_group['lr'])
         
         # if an upstream lr changes, don't change any other LRs yet.
-        if new_lr != old_lr:
-            print(n, 'lr changed')
-            break
+        #if new_lr != old_lr:
+        #    print(n, 'lr changed')
+        #    break
 
 
         if args.save_checkpoint and epoch == num_ep - 1:

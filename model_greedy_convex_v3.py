@@ -8,6 +8,20 @@ import numpy as np
 import math
 import sys
 
+
+def conv2d_or_1d(in_planes, planes, kernel_size=1, padding=0, bias=False, groups=1, dimensions=2):
+    if dimensions == 2:
+        return nn.Conv2d(in_planes, planes, kernel_size=kernel_size, padding=padding, groups=groups, bias=bias)
+    else:
+        return nn.Conv1d(in_planes, planes, kernel_size=kernel_size, padding=padding, groups=groups, bias=bias)
+
+
+def bn2d_or_1d(in_planes, affine=False, dimensions=2):
+    if dimensions == 2:
+        return nn.BatchNorm2d(in_planes, affine=affine)
+    else:
+        return nn.BatchNorm1d(in_planes, affine=affine)
+
 class SignPatternGenerator(torch.nn.Module):
     """
         Generates sign patterns for a convex NN module. n is the number of hidden layers in the network,
@@ -26,6 +40,7 @@ class SignPatternGenerator(torch.nn.Module):
                  bn_before_layer=True,
                  previous_layer_weights=[],
                  previous_layer_biases=[],
+                 dimensions=2,
         ):
         """
             two_sided: bool which determines whether one should use the positive and
@@ -44,23 +59,22 @@ class SignPatternGenerator(torch.nn.Module):
             curr_in_planes = in_planes
             for layer in range(n):
 
-
-                curr_layer = [nn.Conv2d(curr_in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias)]
+                curr_layer = [conv2d_or_1d(curr_in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias, dimensions=dimensions)]
                 if len(previous_layer_weights) > layer:
                     curr_layer[0].weight.data = previous_layer_weights[layer]
                     curr_layer[0].bias.data = previous_layer_biases[layer]
                 if use_bn:
                     if bn_before_layer:
-                        curr_layer = [nn.BatchNorm2d(curr_in_planes, affine=False)] + curr_layer
+                        curr_layer = [bn2d_or_1d(curr_in_planes, affine=False, dimensions=dimensions)] + curr_layer
                     else:
-                        curr_layer += [nn.BatchNorm2d(planes, affine=False)]
+                        curr_layer += [bn2d_or_1d(planes, affine=False, dimensions=dimensions)]
 
                 curr_layer = nn.Sequential(*curr_layer)
                 self.layer_n_generators.append(curr_layer)
                 curr_in_planes = planes
             self.layer_n_generators = nn.ModuleList(self.layer_n_generators)
         else:
-            self.layer_n_generators = nn.Conv2d(in_planes, n*planes, kernel_size=kernel_size, padding=padding, bias=bias)
+            self.layer_n_generators = conv2d_or_1d(in_planes, n*planes, kernel_size=kernel_size, padding=padding, bias=bias)
 
         self.n = n
         self.two_sided = two_sided
@@ -104,7 +118,7 @@ class custom_cvx_layer(torch.nn.Module):
                  bias=True, downsample=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, burer_monteiro=False, burer_dim=1,
                  sp_weight=None, sp_bias=None, relu=False, lambd=1e-10, groups=1,
-                 pattern_depth=1):
+                 pattern_depth=1, dimensions=2):
         super(custom_cvx_layer, self).__init__()
 
         self.P = planes
@@ -116,11 +130,14 @@ class custom_cvx_layer(torch.nn.Module):
         self.num_classes = num_classes
         self.downsample = downsample
         if downsample:
-            self.down = psi(2)
+            self.down = psi(2, dimensions=dimensions)
 
         self.out_size = (in_size+ 2*padding - kernel_size + 1) # assumes a stride and dilation of 1
         self.k_eff = self.out_size//self.avg_size
-        self.a = self.k_eff * self.k_eff
+        if dimensions==2:
+            self.a = self.k_eff * self.k_eff
+        else:
+            self.a = self.k_eff
         self.burer_monteiro = burer_monteiro
         self.burer_dim = burer_dim
         self.bias = bias
@@ -129,41 +146,51 @@ class custom_cvx_layer(torch.nn.Module):
         self.in_size = in_size
         self.in_planes = in_planes
         self.nonneg_aggregate = nonneg_aggregate
-
+        self.dimensions = dimensions
         self.aggregate_conv = None
         self.aggregated = False
         self.decomposed_conv = None
         self.decomposed = False
         self.lambd = lambd
 
-        self.post_pooling = nn.AvgPool2d(kernel_size=avg_size)
         self.groups = groups
-        self.downsample_rep = psi(self.k_eff)
+        self.downsample_rep = psi(self.k_eff, dimensions=dimensions)
         self.relu = relu
 
         if not self.relu:
-            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias, n=pattern_depth)
+            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias, n=pattern_depth, dimensions=dimensions)
             for param in self.sign_pattern_generator.parameters():
                 param.requires_grad = False
 
         self.act = nn.ReLU()
 
         if self.burer_monteiro:
-            self.linear_operator = nn.Conv2d(in_planes, planes*self.burer_dim, 
-                    kernel_size=kernel_size, padding=self.padding, bias=bias)
+            self.linear_operator = conv2d_or_1d(in_planes, planes*self.burer_dim, 
+                    kernel_size=kernel_size, padding=self.padding, bias=bias, dimensions=dimensions)
             self.fc = nn.Linear(planes*self.burer_dim*self.a, num_classes)
             self.transformed_linear_operator =  None
+            if dimensions == 2:
+                self.post_pooling = nn.AdaptiveAvgPool2d(self.k_eff)
+            else:
+                self.post_pooling = nn.AdaptiveAvgPool1d(self.k_eff)
 
         else:
-            dummy_lin_operator = nn.Conv2d(in_planes//self.groups, planes, kernel_size=kernel_size, padding=self.padding, bias=bias)
+            dummy_lin_operator = conv2d_or_1d(in_planes//self.groups, planes, kernel_size=kernel_size, padding=self.padding, bias=bias, dimensions=dimensions)
             dummy_fc = nn.Linear(planes*self.a, num_classes)
-            
-            U_reshaped = dummy_lin_operator.weight.data.reshape((self.P, -1, self.in_planes//self.groups*self.kernel_size*self.kernel_size)).permute((0, 2, 1)) # P x h x m
-            V_reshaped = dummy_fc.weight.data.t().reshape((self.P, -1, self.a, self.num_classes)).reshape((self.P, -1, self.a*self.num_classes)) # P x m x ac
-            Z_eff = U_reshaped @ V_reshaped
-            Z_eff_conv = Z_eff.permute(0, 2, 1).reshape((-1, self.in_planes//self.groups, self.kernel_size, self.kernel_size))
-            self.linear_operator = nn.Conv2d(in_planes*self.a, planes*num_classes*self.a, 
-                    kernel_size=kernel_size, padding=0, bias=bias, groups=self.groups*self.a)
+           
+            if dimensions == 2:
+                U_reshaped = dummy_lin_operator.weight.data.reshape((self.P, -1, self.in_planes//self.groups*self.kernel_size*self.kernel_size)).permute((0, 2, 1)) # P x h x m
+                V_reshaped = dummy_fc.weight.data.t().reshape((self.P, -1, self.a, self.num_classes)).reshape((self.P, -1, self.a*self.num_classes)) # P x m x ac
+                Z_eff = U_reshaped @ V_reshaped
+                Z_eff_conv = Z_eff.permute(0, 2, 1).reshape((-1, self.in_planes//self.groups, self.kernel_size, self.kernel_size))
+            else:
+                U_reshaped = dummy_lin_operator.weight.data.reshape((self.P, -1, self.in_planes//self.groups*self.kernel_size)).permute((0, 2, 1)) # P x h x m
+                V_reshaped = dummy_fc.weight.data.t().reshape((self.P, -1, self.a, self.num_classes)).reshape((self.P, -1, self.a*self.num_classes)) # P x m x ac
+                Z_eff = U_reshaped @ V_reshaped
+                Z_eff_conv = Z_eff.permute(0, 2, 1).reshape((-1, self.in_planes//self.groups, self.kernel_size))
+
+            self.linear_operator = conv2d_or_1d(in_planes*self.a, planes*num_classes*self.a, 
+                    kernel_size=kernel_size, padding=0, bias=bias, groups=self.groups*self.a, dimensions=dimensions)
             
             self.linear_operator.weight.data = Z_eff_conv
 
@@ -172,12 +199,15 @@ class custom_cvx_layer(torch.nn.Module):
             if self.bias:
                 U_bias_data = dummy_lin_operator.bias.data.reshape((self.P, -1)) # P x m
                 self.linear_operator.bias.data = torch.einsum('pm, pma -> pa', U_bias_data, V_reshaped).reshape(-1) # Pac
+            if dimensions == 2:
+                self.post_pooling = nn.AdaptiveAvgPool2d(1)
+            else:
+                self.post_pooling = nn.AdaptiveAvgPool1d(1)
 
             del dummy_lin_operator
             del dummy_fc
 
-        self.rep = None
-
+        self.rep = nn.Parameter(data=None, requires_grad=False)
 
     def forward(self, x, transformed_model=False, store_activations=False):
         # pre-compute sign patterns and downsampling before computational graph necessary
@@ -187,9 +217,12 @@ class custom_cvx_layer(torch.nn.Module):
 
             if not self.relu:
                 sign_patterns = self.sign_pattern_generator(x) > 0 # N x P x h x w
-        
-        N, C, H, W = x.shape
-        # for burer-monteiro, m = burer_dim, otherwise m = c * k_eff * k_eff
+
+        N, C = x.shape[0], x.shape[1]
+        if self.dimensions == 2:
+            H, W = x.shape[2], x.shape[3]
+        else:
+            H = x.shape[2]
 
         if self.decomposed:
             X_Z = self.decomposed_conv(x)
@@ -203,7 +236,10 @@ class custom_cvx_layer(torch.nn.Module):
             if self.relu:
                 DX_Z = self.act(X_Z)
             else:
-                DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2)).reshape((N, -1,H, W))
+                if self.dimensions == 2:
+                    DX_Z = (X_Z.reshape((N, self.P, -1, H, W))*sign_patterns.unsqueeze(2)).reshape((N, -1, H, W))
+                else:
+                    DX_Z = (X_Z.reshape((N, self.P, -1, H))*sign_patterns.unsqueeze(2)).reshape((N, -1, H))
 
             if store_activations:
                 # N x Pa x H x W
@@ -217,7 +253,11 @@ class custom_cvx_layer(torch.nn.Module):
             if self.relu:
                 DX_Z = self.act(X_Z)
             else:
-                DX_Z = torch.einsum('nphw, npmhw -> nmhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
+                if self.dimensions == 2:
+                    DX_Z = torch.einsum('nphw, npmhw -> nmhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
+                else:
+                    DX_Z = torch.einsum('nph, npmh -> nmh', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H)))
+
             DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
             DX_Z = DX_Z.reshape((N, self.a, self.num_classes, self.a))
             pred_transformed = (torch.einsum('naca -> nc', DX_Z) + self.transformed_bias_operator)
@@ -227,47 +267,56 @@ class custom_cvx_layer(torch.nn.Module):
                 x = self.reshape_data_for_groups(x, self.kernel_size, self.padding)
 
             X_Z = self.linear_operator(x) # N x P*m x h x w
-            N, C, H, W = X_Z.shape
+            if self.dimensions == 2:
+                N, C, H, W = X_Z.shape
+            else:
+                N, C, H = X_Z.shape
             
             if self.relu:
-                DX_Z = self.act(X_Z).reshape((N, self.a*self.P, -1, H, W))
+                if self.dimensions == 2:
+                    DX_Z = self.act(X_Z).reshape((N, self.a*self.P, -1, H, W))
+                else:
+                    DX_Z = self.act(X_Z).reshape((N, self.a*self.P, -1, H))
             else:
                 sp = self.reshape_data_for_groups(sign_patterns.float(), 1, 0)
-                DX_Z = torch.einsum('nphw, npmhw -> npmhw', sp, X_Z.reshape((N, self.a*self.P, -1, H, W)))
+                if self.dimensions == 2:
+                    DX_Z = torch.einsum('nphw, npmhw -> npmhw', sp, X_Z.reshape((N, self.a*self.P, -1, H, W)))
+                else:
+                    DX_Z = torch.einsum('nph, npmh -> npmh', sp, X_Z.reshape((N, self.a*self.P, -1, H)))
 
             if store_activations:
                 with torch.no_grad():
-                    rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H, W)).reshape((N, self.a, -1, H, W)).permute(0, 2, 1, 3, 4)
+                    if self.dimensions == 2:
+                        rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H, W)).reshape((N, self.a, -1, H, W)).permute(0, 2, 1, 3, 4)
+                    else:
+                        rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H)).reshape((N, self.a, -1, H)).permute(0, 2, 1, 3)
+
                     rep = self.downsample_rep.inverse(rep)
-                    self.rep = rep
+                    self.rep.data = rep
 
             DX_Z = DX_Z.sum(1)
-            DX_Z = self.post_pooling(DX_Z).squeeze(2).squeeze(2) # n x c
+            DX_Z = self.post_pooling(DX_Z).squeeze(2)# n x c
+            if self.dimensions == 2:
+                DX_Z = DX_Z.squeeze(2)
             return DX_Z + self.bias_operator
 
 
-            #X_Z = self.linear_operator(x) # N x P*m x h x w
-            #if self.relu:
-            #    DX_Z = self.act(X_Z)
-            #else:
-            #    DX_Z = torch.einsum('nphw, npmhw -> nmhw', sign_patterns.float(), X_Z.reshape((N, self.P, -1, H, W)))
-            #if store_activations:
-            #    # N x ac x H x W
-            #    self.rep = DX_Z.detach()
-
-            #DX_Z = self.post_pooling(DX_Z) # n x m x k_eff x k_eff
-            #DX_Z = DX_Z.reshape((N, self.a, self.num_classes, self.a))
-            #return (torch.einsum('naca -> nc', DX_Z) + self.bias_operator)
-
     def reshape_data_for_groups(self, x, kernel_size, padding):
-        x_padded = torch.nn.functional.pad(x, (padding, padding, padding, padding))
-        N, C, H, W = x.shape
-        new_H = kernel_size + H // self.k_eff - 1
-        new_W = kernel_size + W // self.k_eff - 1
-        x_unf = torch.nn.functional.unfold(x_padded, kernel_size=(new_H, new_W), padding=0, stride=(new_H-kernel_size+1, new_W-kernel_size+1)) # N x c*newH*newW x k_eff*k_eff
-        x_unf = x_unf.reshape((N, C, -1, self.k_eff*self.k_eff))
-        x_unf = x_unf.permute(0, 3, 1, 2).reshape((N, C*self.k_eff*self.k_eff, -1)) # N x c*k_eff*k_eff x new_h*newW
-        x_fold = torch.nn.functional.fold(x_unf, output_size=(new_H, new_W), kernel_size=1, padding=0) # N x ac x newH x newW
+        if self.dimensions == 2:
+            x_padded = torch.nn.functional.pad(x, (padding, padding, padding, padding))
+            N, C, H, W = x.shape
+            new_H = kernel_size + H // self.k_eff - 1
+            new_W = kernel_size + W // self.k_eff - 1
+            x_unf = torch.nn.functional.unfold(x_padded, kernel_size=(new_H, new_W), padding=0, stride=(new_H-kernel_size+1, new_W-kernel_size+1)) # N x c*newH*newW x k_eff*k_eff
+            x_unf = x_unf.reshape((N, C, -1, self.k_eff*self.k_eff))
+            x_unf = x_unf.permute(0, 3, 1, 2).reshape((N, C*self.k_eff*self.k_eff, -1)) # N x c*k_eff*k_eff x new_h*newW
+            x_fold = torch.nn.functional.fold(x_unf, output_size=(new_H, new_W), kernel_size=1, padding=0) # N x ac x newH x newW
+        else:
+            x_padded = torch.nn.functional.pad(x, (padding, padding))
+            N, C, H = x.shape
+            new_H = kernel_size + H // self.k_eff - 1
+            x_unf = x_padded.unfold(2, new_H, new_H-kernel_size+1) 
+            x_fold = x_unf.permute(0, 2, 1, 3).reshape((N, self.a*C, new_H))
 
         return x_fold
     
@@ -407,28 +456,44 @@ class custom_cvx_layer(torch.nn.Module):
             return torch.mean(F.relu(-DX_Z))*self.P
 
 class psi(nn.Module):
-    def __init__(self, block_size):
+    def __init__(self, block_size, dimensions=2):
         super(psi, self).__init__()
         self.block_size = block_size
         self.block_size_sq = block_size*block_size
+        self.dimensions = dimensions
 
     def forward(self, input):
-        output = input.permute(0, 2, 3, 1)
-        (batch_size, s_height, s_width, s_depth) = output.size()
-        d_depth = s_depth * self.block_size_sq
+        if self.dimensions == 2:
+            output = input.permute(0, 2, 3, 1)
+            (batch_size, s_height, s_width, s_depth) = output.size()
+            d_depth = s_depth * self.block_size_sq
+            d_height = int(s_height / self.block_size)
+            t_1 = output.split(self.block_size, 2)
+            stack = [t_t.contiguous().view(batch_size, d_height, d_depth) for t_t in t_1]
+            output = torch.stack(stack, 1)
+            output = output.permute(0, 2, 1, 3)
+            output = output.permute(0, 3, 1, 2)
+            return output.contiguous()
+
+        output = input
+        (batch_size, s_depth, s_height) = output.size()
+        d_depth = s_depth * self.block_size
         d_height = int(s_height / self.block_size)
         t_1 = output.split(self.block_size, 2)
-        stack = [t_t.contiguous().view(batch_size, d_height, d_depth) for t_t in t_1]
-        output = torch.stack(stack, 1)
-        output = output.permute(0, 2, 1, 3)
-        output = output.permute(0, 3, 1, 2)
+        stack = [t_t.contiguous().view(batch_size, d_depth) for t_t in t_1]
+        output = torch.stack(stack, 2)
         return output.contiguous()
 
     def inverse(self, output):
         """ Expects size (n, channels, block_size_sq, height/block_size, width/block_size)"""
-        output = output.reshape((output.shape[0], output.shape[1], self.block_size, self.block_size, output.shape[-2], output.shape[-1]))
-        output = output.permute(0, 1, 2, 4, 3, 5)
-        input = output.reshape((output.shape[0], output.shape[1], self.block_size*output.shape[3], self.block_size*output.shape[-1]))
+        if self.dimensions == 2:
+            output = output.reshape((output.shape[0], output.shape[1], self.block_size, self.block_size, output.shape[-2], output.shape[-1]))
+            output = output.permute(0, 1, 2, 4, 3, 5)
+            input = output.reshape((output.shape[0], output.shape[1], self.block_size*output.shape[3], self.block_size*output.shape[-1]))
+            return input.contiguous()
+        
+        output = output.reshape((output.shape[0], output.shape[1], self.block_size, output.shape[-1]))
+        input = output.reshape((output.shape[0], output.shape[1], self.block_size*output.shape[-1]))
         return input.contiguous()
 
 
@@ -437,7 +502,7 @@ class convexGreedyNet(nn.Module):
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
                  sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
-                 lambd=1e-10, pattern_depth=1):
+                 lambd=1e-10, pattern_depth=1, dimensions=2):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -473,7 +538,10 @@ class convexGreedyNet(nn.Module):
 
 
             if n in downsample:
-                pre_factor *= 4
+                if dimensions == 2:
+                    pre_factor *= 4
+                else:
+                    pre_factor *= 2
                 avg_size = avg_size // 2
                 in_size = in_size // 2
                 #if n > 2 or (burer_monteiro and burer_dim < 4):
@@ -483,14 +551,14 @@ class convexGreedyNet(nn.Module):
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups, 
-                                         pattern_depth=pattern_depth))
+                                         pattern_depth=pattern_depth, dimensions=dimensions))
             else:
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups,
-                                         pattern_depth=pattern_depth))
+                                         pattern_depth=pattern_depth, dimensions=dimensions))
     
             print(n)
             print(pre_factor*in_planes, next_in_planes)
@@ -564,6 +632,7 @@ class convexGreedyNet(nn.Module):
                     out = self.blocks[n](out, transformed_model, store_activations)
                 else:
                     out = self.blocks[n].decompose_weights(out)
+
         return out
 
 if __name__ == '__main__':
