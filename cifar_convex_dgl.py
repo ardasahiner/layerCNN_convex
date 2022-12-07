@@ -15,6 +15,11 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.cuda.amp import GradScaler, autocast
 
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+
 import os
 import argparse
 
@@ -58,7 +63,7 @@ parser.add_argument('--relu', action='store_true',
 
 parser.add_argument('--feat_agg', default='weight_rankone', type=str,
                         help='way to aggregate features from layer to layer')
-parser.add_argument('--multi_gpu', default=0, type=int,
+parser.add_argument('--multi_gpu', action="store_true",
                         help='use multiple gpus')
 parser.add_argument('--gpu', default=None, type=int, help='Which GPU to use')
 
@@ -78,7 +83,6 @@ parser.add_argument('--mse', action='store_true', help='Whether to use MSE loss 
 parser.add_argument('--hinge_loss', action='store_true', help='Whether to enforce hinge loss')
 parser.add_argument('--lambda_hinge_loss', nargs='+', default=[1e-4], type=float, help='Hinge loss enforcement parameter')
 parser.add_argument('--squared_hinge', action='store_true', help='Whether to use squared hinge loss')
-
 
 parser.add_argument('--e2e_epochs', default=0, type=int, help='number of epochs after training layerwise to fine-tune e2e')
 parser.add_argument('--nonneg_aggregate', action='store_true')
@@ -147,7 +151,6 @@ for i in range(args.ncnn):
 assert args.bn == False, 'batch norm not yet implemented'
 assert args.kernel_size %2 == 1, 'kernel size must be odd'
 args.debug_parameters = args.debug_parameters > 0
-args.multi_gpu = args.multi_gpu > 0
 
 if args.debug:
     args.nepochs = 1 # we run just one epoch per greedy layer training in debug mode
@@ -195,6 +198,52 @@ print('not using ffcv')
 
 if args.data_set == 'IMNET':
     assert False, "Need to use FFCV with imagenet"
+
+# Model
+
+print('==> Building model..')
+n_cnn=args.ncnn
+sign_pattern_weights = []
+sign_pattern_bias = []
+
+if args.signs_sgd:
+    sgd_model = torch.load(args.sgd_path)
+    sgd_blocks = sgd_model['net'].module[0] # should be blocks with CNN, BN, ReLU
+    sgd_blocks = sgd_blocks.blocks
+
+    for n in range(n_cnn):
+        for name, param in sgd_blocks[n].named_parameters():
+            if 'weight' in name:
+                sign_pattern_weights.append(param)
+            elif 'bias' in name:
+                sign_pattern_bias.append(param)
+
+
+net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
+                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
+                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
+                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
+                      pattern_depth=args.pattern_depth, dimensions=args.dimensions)
+
+
+with open(name_log_txt, "a") as text_file:
+    print(net, file=text_file)
+
+n_parameters = sum(p.numel() for p in net.parameters())
+print('number of params:', n_parameters)
+
+if args.multi_gpu:
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    print(f"Start running basic DDP example on rank {rank}.")
+
+    # create model and move it to GPU with id rank
+    device_id = rank % torch.cuda.device_count()
+    net = net.to(device_id)
+    net = DDP(net, device_ids=[device_id], find_unused_parameters=True)
+else:
+    net = net.cuda()
 # Data
 print('==> Preparing data..')
 
@@ -325,8 +374,13 @@ else:
     assert False, 'Something with dataset went wrong'
 
 if args.data_set != 'SPEECH':
-    trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    if not args.multi_gpu:
+        trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    else:
+        trainloader_classifier = torch.utils.data.DataLoader(trainset_class, batch_size=args.batch_size, shuffle=False, sampler=DistributedSampler(trainset_class), num_workers=args.workers)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+
 
 if args.test_cifar101:
     X = np.load(os.path.join(args.data_dir, 'CIFAR-10.1', 'datasets', 'cifar10.1_v6_data.npy'))
@@ -343,43 +397,7 @@ if args.test_cifar101:
     testset = PrepareData(X, y)
     testloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-# Model
 
-print('==> Building model..')
-n_cnn=args.ncnn
-sign_pattern_weights = []
-sign_pattern_bias = []
-
-if args.signs_sgd:
-    sgd_model = torch.load(args.sgd_path)
-    sgd_blocks = sgd_model['net'].module[0] # should be blocks with CNN, BN, ReLU
-    sgd_blocks = sgd_blocks.blocks
-
-    for n in range(n_cnn):
-        for name, param in sgd_blocks[n].named_parameters():
-            if 'weight' in name:
-                sign_pattern_weights.append(param)
-            elif 'bias' in name:
-                sign_pattern_bias.append(param)
-
-
-net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
-                      downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
-                      nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
-                      burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
-                      pattern_depth=args.pattern_depth, dimensions=args.dimensions)
-
-
-with open(name_log_txt, "a") as text_file:
-    print(net, file=text_file)
-
-n_parameters = sum(p.numel() for p in net.parameters())
-print('number of params:', n_parameters)
-
-if args.multi_gpu:
-    net = torch.nn.DataParallel(net).cuda()
-net = net.cuda()
 cudnn.benchmark = True
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
@@ -390,7 +408,8 @@ else:
     criterion_classifier = nn.CrossEntropyLoss()
 
 def train_classifier(epoch):
-    print('\nSubepoch: %d' % epoch)
+    if (args.multi_gpu and rank==0) or not args.multi_gpu:
+        print('\nSubepoch: %d' % epoch)
     net.train()
 
     train_loss = [0]*ncnn
@@ -398,7 +417,10 @@ def train_classifier(epoch):
     total = [0]*ncnn
     for batch_idx, (inputs, targets) in enumerate(trainloader_classifier):
         if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
+            if args.multi_gpu:
+                inputs, targets = inputs.to(device_id), targets.to(device_id)
+            else:
+                inputs, targets = inputs.cuda(), targets.cuda()
 
         if args.mse:
             targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
@@ -412,7 +434,7 @@ def train_classifier(epoch):
                 outputs = net([inputs, n], store_activations=True)
                 targets_loss_curr = targets_loss.to(outputs.device)
                 loss = criterion_classifier(outputs, targets_loss_curr)
-
+            
             scaler.scale(loss).backward()
             scaler.step(layer_optim[n])
             scaler.update()
@@ -427,11 +449,11 @@ def train_classifier(epoch):
             _, predicted = torch.max(outputs.detach().data, 1)
             total[n] += targets.size(0)
             correct[n] += predicted.eq(targets.data).cpu().sum().item()
-            
-        torch.cuda.synchronize()
-        
-        progress_bar(batch_idx, len(trainloader_classifier), "Loss: {} | Acc: {}"
-                .format(np.array(train_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
+
+        if (args.multi_gpu and rank==0) or not args.multi_gpu:
+            progress_bar(batch_idx, len(trainloader_classifier), "Loss: {} | Acc: {}"
+                    .format(np.array(train_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
+
 
     acc = 100.*float(correct[-1])/float(total[-1])
     return acc, [t/(batch_idx+1) for t in train_loss]
@@ -442,10 +464,7 @@ n_start = 0
 # resume from previously trained checkpoint
 if args.resume and args.checkpoint_path != '':
     checkpoint = torch.load(args.checkpoint_path)
-    if args.multi_gpu:
-        net.module.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        net.load_state_dict(checkpoint['model_state_dict'])
+    net.load_state_dict(checkpoint['model_state_dict'])
     n_start = checkpoint['n']+1
 all_outs = [[] for i in range(args.ncnn)]
 
@@ -462,7 +481,10 @@ def test(epoch,ensemble=False):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             if use_cuda:
-                inputs, targets = inputs.cuda(), targets.cuda()
+                if args.multi_gpu:
+                    inputs, targets = inputs.to(device_id), targets.to(device_id)
+                else:
+                    inputs, targets = inputs.cuda(), targets.cuda()
 
             if args.mse:
                 targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
@@ -488,11 +510,13 @@ def test(epoch,ensemble=False):
                 _, predicted = torch.max(outputs.detach().data, 1)
                 total[n] += targets.size(0)
                 correct[n] += predicted.eq(targets.data).cpu().sum().item()
-                
-            torch.cuda.synchronize()
-        
-            progress_bar(batch_idx, len(testloader), "Test Loss: {} | Acc: {}"
-                    .format(np.array(test_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
+            
+            torch.cuda.synchronize(device_id)
+
+            if (args.multi_gpu and rank==0) or not args.multi_gpu:
+                progress_bar(batch_idx, len(testloader), "Test Loss: {} | Acc: {}"
+                        .format(np.array(test_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
+
 
         acc = 100. * float(correct[-1]) / float(total[-1])
         
@@ -512,7 +536,8 @@ def test(epoch,ensemble=False):
                 _, predicted = torch.max(total_out, 1)
                 correct = predicted.eq(all_targs).sum()
                 acc_ensemble = 100*float(correct)/float(total[-1])
-                print('Acc_ensemble: %.2f'%acc_ensemble)
+                if (args.multi_gpu and rank==0) or not args.multi_gpu:
+                    print('Acc_ensemble: %.2f'%acc_ensemble)
 
         if ensemble:
             return acc,acc_ensemble
@@ -524,6 +549,7 @@ layer_optim = [None]*ncnn
 layer_scheduler = [None]*ncnn
 
 for n in range(n_start, n_cnn):
+
     if args.multi_gpu:
         to_train = list(filter(lambda p: p.requires_grad, net.module.blocks[n].parameters()))
     else:
@@ -541,43 +567,32 @@ for n in range(n_start, n_cnn):
 scaler = GradScaler()
 
 for epoch in range(0, num_ep):
+    if args.multi_gpu:
+        trainloader_classifier.sampler.set_epoch(epoch)
     acc_train, loss_train = train_classifier(epoch)
     if args.ensemble:
         acc_test,acc_test_ensemble = test(epoch,args.ensemble)
 
-        with open(name_log_txt, "a") as text_file:
-            print("epoch {}, train loss {}, train {}, test {},ense {} "
-                  .format(epoch,loss_train[-1],acc_train,acc_test,acc_test_ensemble), file=text_file)
+        if (args.multi_gpu and rank==0) or not args.multi_gpu:
+            with open(name_log_txt, "a") as text_file:
+                print("epoch {}, train loss {}, train {}, test {},ense {} "
+                      .format(epoch,loss_train[-1],acc_train,acc_test,acc_test_ensemble), file=text_file)
     else:
         acc_test = test(epoch)
-        with open(name_log_txt, "a") as text_file:
-            print("epoch {}, train loss {}, train {}, test {}, ".format(epoch,loss_train[-1],acc_train,acc_test), file=text_file)
+        if (args.multi_gpu and rank==0) or not args.multi_gpu:
+            with open(name_log_txt, "a") as text_file:
+                print("epoch {}, train loss {}, train {}, test {}, ".format(epoch,loss_train[-1],acc_train,acc_test), file=text_file)
 
     if args.debug:
         break
 
     for n in range(ncnn):
-        for i, param_group in enumerate(layer_optim[n].param_groups):
-            old_lr = float(param_group['lr'])
-            break
         layer_scheduler[n].step()
-        for i, param_group in enumerate(layer_optim[n].param_groups):
-            new_lr = float(param_group['lr'])
-        
-        # if an upstream lr changes, don't change any other LRs yet.
-        #if new_lr != old_lr:
-        #    print(n, 'lr changed')
-        #    break
 
-
-        if args.save_checkpoint and epoch == num_ep - 1:
-            curr_sv_model = name_save_model + '_' + str(n) + '_' + str(i) + '.pt'
-            print('saving checkpoint')
-            if args.multi_gpu:
-                torch.save({
-                        'model_state_dict': net.module.state_dict(),
-                        }, curr_sv_model)
-            else:
+        if (args.multi_gpu and rank==0) or not args.multi_gpu:
+            if args.save_checkpoint and epoch == num_ep - 1:
+                curr_sv_model = name_save_model + '_' + str(n) + '_' + str(i) + '.pt'
+                print('saving checkpoint')
                 torch.save({
                         'model_state_dict': net.state_dict(),
                         }, curr_sv_model)

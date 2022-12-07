@@ -67,7 +67,7 @@ parser.add_argument('--save_dir', '-sd', default='checkpoints/', help='directory
 parser.add_argument('--checkpoint_path', '-cp', default='', help='path to checkpoint to load')
 parser.add_argument('--deterministic', '-det', action='store_true', help='Deterministic operations for numerical stability')
 parser.add_argument('--save_checkpoint', action='store_true', help='Whether to save checkpoints')
-parser.add_argument('--optimizer', default='SGD', help='What optimizer to use')
+parser.add_argument('--optimizer', default='Adam', help='What optimizer to use')
 parser.add_argument('--reset_momentum', action='store_true', help='Whether to reset the momentum parameter every epochdecay epochs')
 
 parser.add_argument('--data_dir', default='/mnt/dense/sahiner', help='Dataset directory')
@@ -94,6 +94,7 @@ parser.add_argument('--data_set', default='CIFAR10', choices=['CIFAR10', 'STL10'
                     type=str, help='Dataset name')
 parser.add_argument('--test_cifar101', action='store_true', 
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
+parser.add_argument('--pattern_depth', default=1, type=int, help='Depth of sign patterns')
 
 
 parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
@@ -381,7 +382,8 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       downsample=downsample, batchnorm=args.bn, sparsity=args.sparsity, feat_aggregate=args.feat_agg,
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
-                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd)
+                      sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
+                      pattern_depth=args.pattern_depth)
     
 with open(name_log_txt, "a") as text_file:
     print(net, file=text_file)

@@ -207,7 +207,7 @@ class custom_cvx_layer(torch.nn.Module):
             del dummy_lin_operator
             del dummy_fc
 
-        self.rep = nn.Parameter(data=None, requires_grad=False)
+        self.rep = None
 
     def forward(self, x, transformed_model=False, store_activations=False):
         # pre-compute sign patterns and downsampling before computational graph necessary
@@ -292,7 +292,7 @@ class custom_cvx_layer(torch.nn.Module):
                         rep = DX_Z.detach().reshape((N, self.a, self.P, -1, H)).reshape((N, self.a, -1, H)).permute(0, 2, 1, 3)
 
                     rep = self.downsample_rep.inverse(rep)
-                    self.rep.data = rep
+                    self.rep = rep
 
             DX_Z = DX_Z.sum(1)
             DX_Z = self.post_pooling(DX_Z).squeeze(2)# n x c
