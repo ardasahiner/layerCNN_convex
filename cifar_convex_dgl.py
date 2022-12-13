@@ -511,8 +511,6 @@ def test(epoch,ensemble=False):
                 total[n] += targets.size(0)
                 correct[n] += predicted.eq(targets.data).cpu().sum().item()
             
-            torch.cuda.synchronize(device_id)
-
             if (args.multi_gpu and rank==0) or not args.multi_gpu:
                 progress_bar(batch_idx, len(testloader), "Test Loss: {} | Acc: {}"
                         .format(np.array(test_loss)/(batch_idx+1), 100.*np.array(correct)/np.array(total)))
