@@ -102,6 +102,7 @@ parser.add_argument('--test_cifar101', action='store_true',
 
 parser.add_argument('--one_vs_all', action='store_true', help='Whether to ensemble num_classes one_vs_all models')
 parser.add_argument('--pattern_depth', default=1, type=int, help='Depth of sign patterns')
+parser.add_argument('--bagnet_patterns', action='store_true', help='Whether to use bagnet patterns')
 
 parser.add_argument('--decompose', action='store_true', help='Whether to decompose Gated ReLU weights into ReLU')
 parser.add_argument('--lambd', default=1e-10, type=float, help='Lambda for cone decomposition')
@@ -224,7 +225,7 @@ net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_siz
                       nonneg_aggregate=args.nonneg_aggregate, kernel_size=args.kernel_size, 
                       burer_monteiro=args.burer_monteiro, burer_dim=args.burer_dim, sign_pattern_weights=sign_pattern_weights,
                       sign_pattern_bias=sign_pattern_bias, relu=args.relu, in_planes = in_planes, decompose=args.decompose, lambd=args.lambd,
-                      pattern_depth=args.pattern_depth, dimensions=args.dimensions)
+                      pattern_depth=args.pattern_depth, dimensions=args.dimensions, bagnet_patterns=args.bagnet_patterns)
 
 
 with open(name_log_txt, "a") as text_file:

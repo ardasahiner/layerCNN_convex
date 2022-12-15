@@ -41,6 +41,7 @@ class SignPatternGenerator(torch.nn.Module):
                  previous_layer_weights=[],
                  previous_layer_biases=[],
                  dimensions=2,
+                 bagnet=False,
         ):
         """
             two_sided: bool which determines whether one should use the positive and
@@ -58,8 +59,17 @@ class SignPatternGenerator(torch.nn.Module):
             self.layer_n_generators = []
             curr_in_planes = in_planes
             for layer in range(n):
+                curr_kernel_size = kernel_size
+                curr_padding = padding
+                if bagnet:
+                    if layer > 0:
+                        curr_kernel_size = 1
+                        curr_padding = 0
+                    else: # hard coded for now, can change
+                        curr_kernel_size = 11
+                        curr_padding = 5
 
-                curr_layer = [conv2d_or_1d(curr_in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias, dimensions=dimensions)]
+                curr_layer = [conv2d_or_1d(curr_in_planes, planes, kernel_size=curr_kernel_size, padding=curr_padding, bias=bias, dimensions=dimensions)]
                 if len(previous_layer_weights) > layer:
                     curr_layer[0].weight.data = previous_layer_weights[layer]
                     curr_layer[0].bias.data = previous_layer_biases[layer]
@@ -118,7 +128,7 @@ class custom_cvx_layer(torch.nn.Module):
                  bias=True, downsample=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, burer_monteiro=False, burer_dim=1,
                  sp_weight=None, sp_bias=None, relu=False, lambd=1e-10, groups=1,
-                 pattern_depth=1, dimensions=2):
+                 pattern_depth=1, dimensions=2, bagnet_patterns=False):
         super(custom_cvx_layer, self).__init__()
 
         self.P = planes
@@ -158,7 +168,7 @@ class custom_cvx_layer(torch.nn.Module):
         self.relu = relu
 
         if not self.relu:
-            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size, padding, bias, n=pattern_depth, dimensions=dimensions)
+            self.sign_pattern_generator = SignPatternGenerator(in_planes, planes, kernel_size=kernel_size, padding=padding, bias=bias, n=pattern_depth, dimensions=dimensions, bagnet=bagnet_patterns)
             for param in self.sign_pattern_generator.parameters():
                 param.requires_grad = False
 
@@ -502,7 +512,7 @@ class convexGreedyNet(nn.Module):
                  in_size=32, downsample=[], batchnorm=False, sparsity=None, feat_aggregate='random',
                  nonneg_aggregate=False, kernel_size=3, burer_monteiro=False, burer_dim=10,
                  sign_pattern_weights=[], sign_pattern_bias=[], relu=False, in_planes=3, decompose=False,
-                 lambd=1e-10, pattern_depth=1, dimensions=2):
+                 lambd=1e-10, pattern_depth=1, dimensions=2, bagnet_patterns=False):
         super(convexGreedyNet, self).__init__()
         self.in_planes = feature_size
 
@@ -551,14 +561,14 @@ class convexGreedyNet(nn.Module):
                                          downsample=True, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups, 
-                                         pattern_depth=pattern_depth, dimensions=dimensions))
+                                         pattern_depth=pattern_depth, dimensions=dimensions, bagnet_patterns=bagnet_patterns))
             else:
                 self.blocks.append(block(in_planes * pre_factor, next_in_planes, in_size, kernel_size=self.kernel_size,
                                          padding=self.padding, avg_size=avg_size, num_classes=num_classes, bias=True, 
                                          downsample=False, sparsity=sparsity, feat_aggregate=feat_aggregate,
                                          nonneg_aggregate=nonneg_aggregate, burer_monteiro=burer_monteiro,
                                          burer_dim=burer_dim, sp_weight=sp_weight, sp_bias=sp_bias, relu=relu, lambd=lambd, groups=groups,
-                                         pattern_depth=pattern_depth, dimensions=dimensions))
+                                         pattern_depth=pattern_depth, dimensions=dimensions, bagnet_patterns=bagnet_patterns))
     
             print(n)
             print(pre_factor*in_planes, next_in_planes)
