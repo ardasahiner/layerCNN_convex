@@ -100,7 +100,8 @@ parser.add_argument('--dimensions', default=2, type=int, help='Number of dimensi
 parser.add_argument('--test_cifar101', action='store_true', 
                     help='Whether to also test on CIFAR-10.1 dataset. In order to make this work, clone the CIFAR-10.1 github repo in args.data_dir.')
 
-parser.add_argument('--one_vs_all', action='store_true', help='Whether to ensemble num_classes one_vs_all models')
+parser.add_argument('--one_vs_all', action='store_true', help='Whether to do one_vs_all classification')
+parser.add_argument('--positive_class', default=0, type=int, help='Index of the positive class in one-vs-all classification')
 parser.add_argument('--pattern_depth', default=1, type=int, help='Depth of sign patterns')
 parser.add_argument('--bagnet_patterns', action='store_true', help='Whether to use bagnet patterns')
 
@@ -218,6 +219,10 @@ if args.signs_sgd:
                 sign_pattern_weights.append(param)
             elif 'bias' in name:
                 sign_pattern_bias.append(param)
+
+
+if args.one_vs_all:
+    num_classes = 1
 
 
 net = convexGreedyNet(custom_cvx_layer, n_cnn, args.feature_size, in_size=in_size, avg_size=args.avg_size, num_classes=num_classes,
@@ -405,6 +410,8 @@ if args.deterministic:
 
 if args.mse:
     criterion_classifier = nn.MSELoss()
+elif args.one_vs_all:
+    criterion_classifier = nn.BCEWithLogitsLoss()
 else:
     criterion_classifier = nn.CrossEntropyLoss()
 
@@ -425,6 +432,9 @@ def train_classifier(epoch):
 
         if args.mse:
             targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
+        elif args.one_vs_all:
+            targets = (targets == args.positive_class).float()
+            targets_loss = targets
         else:
             targets_loss = targets
 
@@ -432,7 +442,7 @@ def train_classifier(epoch):
             # Forward
             layer_optim[n].zero_grad()
             with autocast():
-                outputs = net([inputs, n], store_activations=True)
+                outputs = net([inputs, n], store_activations=True).squeeze()
                 targets_loss_curr = targets_loss.to(outputs.device)
                 loss = criterion_classifier(outputs, targets_loss_curr)
             
@@ -447,7 +457,10 @@ def train_classifier(epoch):
                 print("Loss is {}, stopping training".format(loss.item()))
                 sys.exit(1)
             
-            _, predicted = torch.max(outputs.detach().data, 1)
+            if args.one_vs_all:
+                predicted = (outputs.detach().data > 0).int()
+            else:
+                _, predicted = torch.max(outputs.detach().data, 1)
             total[n] += targets.size(0)
             correct[n] += predicted.eq(targets.data).cpu().sum().item()
 
@@ -489,6 +502,9 @@ def test(epoch,ensemble=False):
 
             if args.mse:
                 targets_loss = nn.functional.one_hot(targets, num_classes=num_classes).float()
+            elif args.one_vs_all:
+                targets = (targets == args.positive_class).float()
+                targets_loss = targets
             else:
                 targets_loss = targets
 
@@ -496,7 +512,7 @@ def test(epoch,ensemble=False):
                 # Forward
 
                 with autocast():
-                    outputs = net([inputs, n], store_activations=True)
+                    outputs = net([inputs, n], store_activations=True).squeeze()
                     targets_loss_curr = targets_loss.to(outputs.device)
                     loss = criterion_classifier(outputs, targets_loss_curr)
 
@@ -508,7 +524,10 @@ def test(epoch,ensemble=False):
                 # measure accuracy and record loss
                 test_loss[n] += loss.item()
                 
-                _, predicted = torch.max(outputs.detach().data, 1)
+                if args.one_vs_all:
+                    predicted = (outputs.detach().data > 0).int()
+                else:
+                    _, predicted = torch.max(outputs.detach().data, 1)
                 total[n] += targets.size(0)
                 correct[n] += predicted.eq(targets.data).cpu().sum().item()
             
@@ -532,7 +551,10 @@ def test(epoch,ensemble=False):
                 for i in range(n_start, n+1):
                     total_out += float(weight[i])*all_outs[i]
 
-                _, predicted = torch.max(total_out, 1)
+                if args.one_vs_all:
+                    predicted = (total_out > 0).int()
+                else:
+                    _, predicted = torch.max(total_out, 1)
                 correct = predicted.eq(all_targs).sum()
                 acc_ensemble = 100*float(correct)/float(total[-1])
                 if (args.multi_gpu and rank==0) or not args.multi_gpu:
